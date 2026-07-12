@@ -1,0 +1,25 @@
+:root {
+  --kairos-background: #030814;
+  --kairos-surface: #07142B;
+  --kairos-surface-raised: #0D1E3B;
+  --kairos-routing-blue: #4C9FFF;
+  --kairos-active-cyan: #76E4FF;
+  --kairos-ivory: #F4F7FF;
+  --kairos-kairos-gold: #FFC766;
+  --kairos-text-primary: #F4F7FF;
+  --kairos-text-secondary: #95A5BF;
+  --kairos-danger: #FF6B6B;
+  --kairos-success: #5DE2B5;
+  --kairos-everyday: #4C9FFF;
+  --kairos-phd: #9E7BFF;
+  --kairos-datter: #49D7D2;
+  --kairos-borderfiber: #FFB85C;
+  --kairos-restricted: #FF6B6B;
+  --kairos-generic: #A5B4CC;
+  --kairos-radius-sm: 8px;
+  --kairos-radius-md: 12px;
+  --kairos-radius-lg: 18px;
+  --kairos-radius-panel: 22px;
+  --kairos-shadow-panel: 0 20px 60px rgba(0,0,0,.42);
+  --kairos-font: -apple-system, BlinkMacSystemFont, Inter, "Segoe UI", sans-serif;
+}

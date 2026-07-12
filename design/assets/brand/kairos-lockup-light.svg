@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="220" viewBox="0 0 980 220">
+      <g transform="translate(8,8) scale(.2)"><defs>
+      <linearGradient id="k-ring" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#3C8DFF"/>
+        <stop offset="45%" stop-color="#B8D8FF"/>
+        <stop offset="78%" stop-color="#F4F7FF"/>
+        <stop offset="100%" stop-color="#FFC766"/>
+      </linearGradient>
+      <linearGradient id="k-k" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0%" stop-color="#76E4FF"/>
+        <stop offset="38%" stop-color="#A9CCFF"/>
+        <stop offset="74%" stop-color="#F4F7FF"/>
+        <stop offset="100%" stop-color="#D9E6FF"/>
+      </linearGradient>
+      <radialGradient id="k-gold" cx="50%" cy="50%" r="50%">
+        <stop offset="0%" stop-color="#FFF8D7"/>
+        <stop offset="55%" stop-color="#FFC766"/>
+        <stop offset="100%" stop-color="#F29B38"/>
+      </radialGradient>
+      <filter id="k-glow" x="-50%" y="-50%" width="200%" height="200%">
+        <feGaussianBlur stdDeviation="10" result="blur"/>
+        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+      <filter id="k-goldglow" x="-100%" y="-100%" width="300%" height="300%">
+        <feGaussianBlur stdDeviation="16" result="blur"/>
+        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+      </filter>
+    </defs>
+      <path d="M 737 244 A 350 350 0 1 0 737 780" fill="none" stroke="url(#k-ring)" stroke-width="56" stroke-linecap="round" filter="url(#k-glow)"/>
+      <g fill="none" stroke="url(#k-k)" stroke-width="50" stroke-linecap="round" stroke-linejoin="round" filter="url(#k-glow)">
+        <path d="M 404 332 L 404 430 Q 404 455 448 493"/>
+        <path d="M 404 692 L 404 594 Q 404 569 448 531"/>
+        <path d="M 495 493 L 670 338"/>
+        <path d="M 495 531 L 670 686"/>
+      </g>
+      <g fill="url(#k-k)" filter="url(#k-glow)">
+        <circle cx="404" cy="322" r="34"/>
+        <circle cx="404" cy="702" r="34"/>
+        <circle cx="680" cy="329" r="34"/>
+        <circle cx="680" cy="695" r="34"/>
+      </g>
+      <circle cx="472" cy="512" r="48" fill="#07142B" stroke="url(#k-k)" stroke-width="22" filter="url(#k-glow)"/>
+      <circle cx="795" cy="512" r="34" fill="url(#k-gold)" filter="url(#k-goldglow)"/>
+    </g>
+      <text x="230" y="126" fill="#07142B" font-family="-apple-system,BlinkMacSystemFont,Inter,Segoe UI,sans-serif" font-size="104" font-weight="650" letter-spacing="-3">Kairos</text>
+      <text x="234" y="172" fill="#4B5B73" font-family="-apple-system,BlinkMacSystemFont,Inter,Segoe UI,sans-serif" font-size="22" font-weight="600" letter-spacing="4">THE RIGHT KNOWLEDGE · THE RIGHT MOMENT</text>
+    </svg>

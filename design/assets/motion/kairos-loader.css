@@ -1,0 +1,9 @@
+
+.kairos-loader { width: 48px; height: 48px; display: inline-grid; place-items: center; }
+.kairos-loader__ring { transform-origin: 50% 50%; animation: kairos-rotate 1.8s linear infinite; }
+.kairos-loader__core { transform-origin: 50% 50%; animation: kairos-pulse 1.2s ease-in-out infinite; }
+.kairos-loader__moment { animation: kairos-moment 1.2s ease-in-out infinite; }
+@keyframes kairos-rotate { to { transform: rotate(360deg); } }
+@keyframes kairos-pulse { 50% { transform: scale(1.18); opacity: 1; } }
+@keyframes kairos-moment { 0%,100% { opacity: .35; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) { .kairos-loader * { animation: none !important; } }

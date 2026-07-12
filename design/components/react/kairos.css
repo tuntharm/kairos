@@ -1,0 +1,12 @@
+
+.kairos-loader { color: #4C9FFF; overflow: visible; }
+.kairos-loader__ring { transform-origin: 32px 32px; animation: kairos-rotate 1.8s linear infinite; }
+.kairos-loader__core { transform-origin: 32px 32px; animation: kairos-pulse 1.2s ease-in-out infinite; }
+.kairos-loader__moment { animation: kairos-moment 1.2s ease-in-out infinite; }
+.kairos-citation-chip { --chip-color:#A5B4CC; display:inline-flex; align-items:center; gap:7px; padding:5px 9px; border:1px solid color-mix(in srgb,var(--chip-color) 35%,transparent); border-radius:999px; background:color-mix(in srgb,var(--chip-color) 11%,#07142B); color:#F4F7FF; font:600 12px/1 -apple-system,BlinkMacSystemFont,Inter,sans-serif; }
+.kairos-citation-chip__dot { width:8px; height:8px; border-radius:50%; background:var(--chip-color); box-shadow:0 0 10px color-mix(in srgb,var(--chip-color) 65%,transparent); }
+.kairos-citation-chip__detail { color:#95A5BF; font-weight:500; }
+@keyframes kairos-rotate { to { transform:rotate(360deg); } }
+@keyframes kairos-pulse { 50% { transform:scale(1.25); } }
+@keyframes kairos-moment { 0%,100% { opacity:.3; } 50% { opacity:1; } }
+@media (prefers-reduced-motion: reduce) { .kairos-loader * { animation:none!important; } }

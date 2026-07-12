@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="160" height="160" viewBox="0 0 160 160">
+  <defs>
+    <linearGradient id="lr" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#4C9FFF"/><stop offset="1" stop-color="#F4F7FF"/></linearGradient>
+    <filter id="lg"><feGaussianBlur stdDeviation="2.8" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <path d="M117 38a52 52 0 1 0 0 84" fill="none" stroke="url(#lr)" stroke-width="8" stroke-linecap="round" stroke-dasharray="260 80">
+    <animate attributeName="stroke-dashoffset" values="0;-340" dur="1.8s" repeatCount="indefinite"/>
+  </path>
+  <g fill="none" stroke="#F4F7FF" stroke-width="6" stroke-linecap="round" stroke-linejoin="round" filter="url(#lg)">
+    <path d="M62 48v22l15 10 21-19"/><path d="M77 80l21 19"/><path d="M62 92v20"/>
+  </g>
+  <g fill="#F4F7FF" filter="url(#lg)"><circle cx="62" cy="43" r="6"/><circle cx="62" cy="117" r="6"/><circle cx="103" cy="56" r="6"/><circle cx="103" cy="104" r="6"/></g>
+  <circle cx="77" cy="80" r="8" fill="#07142B" stroke="#76E4FF" stroke-width="5"><animate attributeName="r" values="7;10;7" dur="1.2s" repeatCount="indefinite"/></circle>
+  <circle cx="126" cy="80" r="7" fill="#FFC766" filter="url(#lg)"><animate attributeName="opacity" values=".35;1;.35" dur="1.2s" repeatCount="indefinite"/></circle>
+  <circle r="4" fill="#FFC766" filter="url(#lg)"><animateMotion dur="1.2s" repeatCount="indefinite" path="M77 80 L103 56 L126 80"/></circle>
+</svg>

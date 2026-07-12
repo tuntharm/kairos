@@ -1,0 +1,382 @@
+{
+  "package": "Kairos Design System",
+  "version": "1.0.0",
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 1884
+    },
+    {
+      "path": "assets/brain-types/archive.svg",
+      "bytes": 241
+    },
+    {
+      "path": "assets/brain-types/attachment.svg",
+      "bytes": 268
+    },
+    {
+      "path": "assets/brain-types/everyday.svg",
+      "bytes": 240
+    },
+    {
+      "path": "assets/brain-types/project.svg",
+      "bytes": 238
+    },
+    {
+      "path": "assets/brain-types/research.svg",
+      "bytes": 281
+    },
+    {
+      "path": "assets/brain-types/restricted.svg",
+      "bytes": 254
+    },
+    {
+      "path": "assets/brand/128x128.png",
+      "bytes": 24541
+    },
+    {
+      "path": "assets/brand/128x128@2x.png",
+      "bytes": 81989
+    },
+    {
+      "path": "assets/brand/32x32.png",
+      "bytes": 2204
+    },
+    {
+      "path": "assets/brand/app-icon.iconset/icon_128x128.png",
+      "bytes": 24541
+    },
+    {
+      "path": "assets/brand/app-icon.iconset/icon_128x128@2x.png",
+      "bytes": 81989
+    },
+    {
+      "path": "assets/brand/app-icon.iconset/icon_16x16.png",
+      "bytes": 742
+    },
+    {
+      "path": "assets/brand/app-icon.iconset/icon_16x16@2x.png",
+      "bytes": 2157
+    },
+    {
+      "path": "assets/brand/app-icon.iconset/icon_256x256.png",
+      "bytes": 81989
+    },
+    {
+      "path": "assets/brand/app-icon.iconset/icon_256x256@2x.png",
+      "bytes": 310763
+    },
+    {
+      "path": "assets/brand/app-icon.iconset/icon_32x32.png",
+      "bytes": 2157
+    },
+    {
+      "path": "assets/brand/app-icon.iconset/icon_32x32@2x.png",
+      "bytes": 6068
+    },
+    {
+      "path": "assets/brand/app-icon.iconset/icon_512x512.png",
+      "bytes": 310763
+    },
+    {
+      "path": "assets/brand/app-icon.iconset/icon_512x512@2x.png",
+      "bytes": 1218100
+    },
+    {
+      "path": "assets/brand/icon.icns",
+      "bytes": 2082216
+    },
+    {
+      "path": "assets/brand/icon.ico",
+      "bytes": 125303
+    },
+    {
+      "path": "assets/brand/icon.png",
+      "bytes": 310763
+    },
+    {
+      "path": "assets/brand/kairos-app-icon-1024.png",
+      "bytes": 1218100
+    },
+    {
+      "path": "assets/brand/kairos-app-icon-approved-original.png",
+      "bytes": 1761202
+    },
+    {
+      "path": "assets/brand/kairos-app-icon-vector-1024.png",
+      "bytes": 188641
+    },
+    {
+      "path": "assets/brand/kairos-app-icon-vector.svg",
+      "bytes": 2743
+    },
+    {
+      "path": "assets/brand/kairos-lockup-dark.svg",
+      "bytes": 2763
+    },
+    {
+      "path": "assets/brand/kairos-lockup-light.svg",
+      "bytes": 2763
+    },
+    {
+      "path": "assets/brand/kairos-mark-dark.svg",
+      "bytes": 890
+    },
+    {
+      "path": "assets/brand/kairos-mark-gradient.svg",
+      "bytes": 2312
+    },
+    {
+      "path": "assets/brand/kairos-mark-light.svg",
+      "bytes": 890
+    },
+    {
+      "path": "assets/brand/kairos-mark-mono-dark.svg",
+      "bytes": 890
+    },
+    {
+      "path": "assets/brand/kairos-mark-mono-light.svg",
+      "bytes": 890
+    },
+    {
+      "path": "assets/brand/kairos-wordmark-dark.svg",
+      "bytes": 486
+    },
+    {
+      "path": "assets/brand/kairos-wordmark-light.svg",
+      "bytes": 486
+    },
+    {
+      "path": "assets/citations/border-fiber.svg",
+      "bytes": 591
+    },
+    {
+      "path": "assets/citations/datter.svg",
+      "bytes": 591
+    },
+    {
+      "path": "assets/citations/everyday.svg",
+      "bytes": 591
+    },
+    {
+      "path": "assets/citations/file.svg",
+      "bytes": 333
+    },
+    {
+      "path": "assets/citations/generic-project.svg",
+      "bytes": 591
+    },
+    {
+      "path": "assets/citations/multiple-sources.svg",
+      "bytes": 262
+    },
+    {
+      "path": "assets/citations/phd.svg",
+      "bytes": 591
+    },
+    {
+      "path": "assets/citations/restricted.svg",
+      "bytes": 427
+    },
+    {
+      "path": "assets/menu-bar/kairos-active-16.png",
+      "bytes": 370
+    },
+    {
+      "path": "assets/menu-bar/kairos-active-18.png",
+      "bytes": 413
+    },
+    {
+      "path": "assets/menu-bar/kairos-active-20.png",
+      "bytes": 493
+    },
+    {
+      "path": "assets/menu-bar/kairos-active-32.png",
+      "bytes": 717
+    },
+    {
+      "path": "assets/menu-bar/kairos-active-36.png",
+      "bytes": 797
+    },
+    {
+      "path": "assets/menu-bar/kairos-active-40.png",
+      "bytes": 901
+    },
+    {
+      "path": "assets/menu-bar/kairos-active.svg",
+      "bytes": 589
+    },
+    {
+      "path": "assets/menu-bar/kairos-attention-16.png",
+      "bytes": 382
+    },
+    {
+      "path": "assets/menu-bar/kairos-attention-18.png",
+      "bytes": 434
+    },
+    {
+      "path": "assets/menu-bar/kairos-attention-20.png",
+      "bytes": 502
+    },
+    {
+      "path": "assets/menu-bar/kairos-attention-32.png",
+      "bytes": 749
+    },
+    {
+      "path": "assets/menu-bar/kairos-attention-36.png",
+      "bytes": 870
+    },
+    {
+      "path": "assets/menu-bar/kairos-attention-40.png",
+      "bytes": 917
+    },
+    {
+      "path": "assets/menu-bar/kairos-attention.svg",
+      "bytes": 639
+    },
+    {
+      "path": "assets/menu-bar/kairos-template-16.png",
+      "bytes": 342
+    },
+    {
+      "path": "assets/menu-bar/kairos-template-18.png",
+      "bytes": 386
+    },
+    {
+      "path": "assets/menu-bar/kairos-template-20.png",
+      "bytes": 449
+    },
+    {
+      "path": "assets/menu-bar/kairos-template-32.png",
+      "bytes": 665
+    },
+    {
+      "path": "assets/menu-bar/kairos-template-36.png",
+      "bytes": 734
+    },
+    {
+      "path": "assets/menu-bar/kairos-template-40.png",
+      "bytes": 822
+    },
+    {
+      "path": "assets/menu-bar/kairos-template.svg",
+      "bytes": 589
+    },
+    {
+      "path": "assets/motion/kairos-loader.css",
+      "bytes": 674
+    },
+    {
+      "path": "assets/motion/kairos-loader.svg",
+      "bytes": 1504
+    },
+    {
+      "path": "assets/motion/kairos-loading.lottie.json",
+      "bytes": 1548
+    },
+    {
+      "path": "assets/routing/error-24.png",
+      "bytes": 770
+    },
+    {
+      "path": "assets/routing/error-48.png",
+      "bytes": 1632
+    },
+    {
+      "path": "assets/routing/error.svg",
+      "bytes": 847
+    },
+    {
+      "path": "assets/routing/idle-24.png",
+      "bytes": 830
+    },
+    {
+      "path": "assets/routing/idle-48.png",
+      "bytes": 1614
+    },
+    {
+      "path": "assets/routing/idle.svg",
+      "bytes": 754
+    },
+    {
+      "path": "assets/routing/routed-multi-24.png",
+      "bytes": 793
+    },
+    {
+      "path": "assets/routing/routed-multi-48.png",
+      "bytes": 1629
+    },
+    {
+      "path": "assets/routing/routed-multi.svg",
+      "bytes": 748
+    },
+    {
+      "path": "assets/routing/routed-one-24.png",
+      "bytes": 803
+    },
+    {
+      "path": "assets/routing/routed-one-48.png",
+      "bytes": 1705
+    },
+    {
+      "path": "assets/routing/routed-one.svg",
+      "bytes": 751
+    },
+    {
+      "path": "assets/routing/routing-24.png",
+      "bytes": 849
+    },
+    {
+      "path": "assets/routing/routing-48.png",
+      "bytes": 1782
+    },
+    {
+      "path": "assets/routing/routing.svg",
+      "bytes": 899
+    },
+    {
+      "path": "components/react/CitationChip.tsx",
+      "bytes": 667
+    },
+    {
+      "path": "components/react/KairosLoader.tsx",
+      "bytes": 796
+    },
+    {
+      "path": "components/react/KairosMark.tsx",
+      "bytes": 1547
+    },
+    {
+      "path": "components/react/index.ts",
+      "bytes": 94
+    },
+    {
+      "path": "components/react/kairos.css",
+      "bytes": 1217
+    },
+    {
+      "path": "docs/design-system.md",
+      "bytes": 1224
+    },
+    {
+      "path": "docs/interaction-states.md",
+      "bytes": 1091
+    },
+    {
+      "path": "preview/index.html",
+      "bytes": 4196
+    },
+    {
+      "path": "preview/preview.css",
+      "bytes": 1298
+    },
+    {
+      "path": "tokens/design-tokens.css",
+      "bytes": 789
+    },
+    {
+      "path": "tokens/design-tokens.json",
+      "bytes": 1022
+    }
+  ]
+}

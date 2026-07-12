@@ -1,5 +1,10 @@
 use serde::Serialize;
-use tauri::Manager;
+use tauri::{
+    Manager,
+    image::Image,
+    menu::{Menu, MenuItem},
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+};
 use tauri_plugin_global_shortcut::{
     Builder as GlobalShortcutBuilder, Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState,
 };
@@ -161,6 +166,37 @@ pub fn run() {
         .setup(|app| {
             let shortcut = Shortcut::new(Some(Modifiers::ALT), Code::Space);
             app.global_shortcut().register(shortcut)?;
+
+            let show_item = MenuItem::with_id(app, "show", "Show Kairos", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit Kairos", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let template_icon =
+                Image::from_bytes(include_bytes!("../icons/kairos-template-18.png"))?;
+
+            TrayIconBuilder::with_id("kairos-menu")
+                .icon(template_icon)
+                .icon_as_template(true)
+                .tooltip("Kairos — the right moment")
+                .menu(&menu)
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        let _ = toggle_window(app);
+                    }
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let _ = toggle_window(tray.app_handle());
+                    }
+                })
+                .build(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

@@ -39,6 +39,21 @@ Context stays bounded: Kairos reads its registered router/current-context notes
 first, then ranks at most three notes across the routed brains' explicit
 `retrievalAllow` scopes. It never inserts a whole vault into a model prompt.
 
+## Desktop surface
+
+The desktop shell uses the vendored [Kairos design system](design/README.md):
+its dark control plane, routing-state artwork, source citation chips, and
+brand tokens keep the local-first boundary legible rather than decorative.
+
+- The bundled application uses the supplied Kairos `.icns`, `.ico`, and
+  alpha-safe PNG icon assets.
+- On macOS, a template menu-bar icon appears while Kairos is running. Click it
+  (or press `⌥ Space`) to show or hide the app; its menu has **Show Kairos**
+  and **Quit Kairos** actions.
+- The browser preview intentionally shows a disabled local-runtime state rather
+  than attempting to call a native Tauri command. Vault access and synthesis
+  happen only in the desktop app.
+
 ## Development
 
 ```bash

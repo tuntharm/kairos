@@ -1,0 +1,49 @@
+{
+  "color": {
+    "background": "#030814",
+    "surface": "#07142B",
+    "surfaceRaised": "#0D1E3B",
+    "routingBlue": "#4C9FFF",
+    "activeCyan": "#76E4FF",
+    "ivory": "#F4F7FF",
+    "kairosGold": "#FFC766",
+    "textPrimary": "#F4F7FF",
+    "textSecondary": "#95A5BF",
+    "danger": "#FF6B6B",
+    "success": "#5DE2B5",
+    "everyday": "#4C9FFF",
+    "phd": "#9E7BFF",
+    "datter": "#49D7D2",
+    "borderFiber": "#FFB85C",
+    "restricted": "#FF6B6B",
+    "generic": "#A5B4CC"
+  },
+  "radius": {
+    "sm": 8,
+    "md": 12,
+    "lg": 18,
+    "panel": 22,
+    "appIcon": 210
+  },
+  "space": {
+    "1": 4,
+    "2": 8,
+    "3": 12,
+    "4": 16,
+    "5": 24,
+    "6": 32,
+    "7": 48
+  },
+  "type": {
+    "fontFamily": "-apple-system, BlinkMacSystemFont, Inter, Segoe UI, sans-serif",
+    "body": 14,
+    "label": 12,
+    "title": 20,
+    "display": 32
+  },
+  "shadow": {
+    "panel": "0 20px 60px rgba(0,0,0,.42)",
+    "glowBlue": "0 0 24px rgba(76,159,255,.28)",
+    "glowGold": "0 0 20px rgba(255,199,102,.32)"
+  }
+}
