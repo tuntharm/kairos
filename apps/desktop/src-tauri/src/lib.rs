@@ -26,19 +26,20 @@ use tauri_plugin_global_shortcut::{
 use kairos_core::{
     AccessDisposition, AppSettings, BrainRecord, BrainRole, BriefAnswer, CROSS_BRAIN_PULSE_QUERY,
     ChatAnswer, ConfirmedNoteWrite, ContentDestination, ContextPack, ConversationTurn,
-    EgressPolicy, GraphBrainSource, GraphBuildOptions, GraphCluster, GraphDiagnostic, GraphIndex,
-    GraphNode, InferenceSettings, KairosConfig, LocalModelChoice, LocalModelFitAssessment,
-    LocalModelProfile, LocalModelSettings, LocalSetupSettings, MEMORY_BUDGET_PRESETS_GB,
+    DEFAULT_CONTEXT_WINDOW_TOKENS, EgressPolicy, GraphBrainSource, GraphBuildOptions, GraphCluster,
+    GraphDiagnostic, GraphIndex, GraphNode, HardwareProfile, InferenceSettings, KairosConfig,
+    LocalModelArtifact, LocalModelChoice, LocalModelFitAssessment, LocalModelProfile,
+    LocalModelSettings, LocalModelVerification, LocalSetupSettings, MEMORY_BUDGET_PRESETS_GB,
     MemoryBudgetMode, NoteWriteConfirmation, NoteWriteKind, NoteWriteProposal, NoteWriteRequest,
     OllamaPullProgress, ProviderConfig, ProviderKind, SummonTarget, WritePolicy,
-    WriteProposalOptions, WriteProposalStore, assess_local_model_fit, build_context,
+    WriteProposalOptions, WriteProposalStore, assess_local_model_fit_for_hardware, build_context,
     build_graph_index, canonicalize_allowed_file, chat_with_anthropic_api, chat_with_claude_cli,
     chat_with_codex_cli, chat_with_ollama, chat_with_openai_api, default_brain_read_policy,
     default_config_path, default_tharm_config, enforce_content_egress, evaluate_access,
-    load_or_migrate_config, local_model_choices, local_model_profiles, ollama_status,
-    preflight_retrieval_access, pull_ollama_model as pull_model_from_ollama, render_chat_prompt,
-    stream_chat_with_ollama, synthesize_ollama, test_ollama_model as test_local_ollama_model,
-    write_config,
+    load_or_migrate_config, local_model_choices, local_model_profile, local_model_recommendations,
+    ollama_status, preflight_retrieval_access, pull_ollama_model as pull_model_from_ollama,
+    render_chat_prompt, stream_chat_with_ollama, synthesize_ollama,
+    test_ollama_model as test_local_ollama_model, write_config,
 };
 
 const KEYCHAIN_SERVICE: &str = "com.tharm.kairos";
@@ -118,6 +119,13 @@ struct LocalSetupStatus {
     running: bool,
     endpoint: String,
     detected_memory_gb: Option<u16>,
+    detected_hardware_profile: HardwareProfile,
+    selected_hardware_profile: HardwareProfile,
+    effective_hardware_profile: HardwareProfile,
+    hardware_profile_label: String,
+    primary_fit_limit_gb: Option<u16>,
+    primary_fit_limit_label: String,
+    hardware_planning_override: bool,
     available_disk_gb: Option<u64>,
     context_window_tokens: u32,
     memory_budget_mode: MemoryBudgetMode,
@@ -130,9 +138,11 @@ struct LocalSetupStatus {
     ollama_install_action: OllamaInstallAction,
     selected_model_fit: LocalModelFitAssessment,
     models: Vec<LocalSetupModel>,
+    recommended_models: Vec<LocalSetupModel>,
+    advanced_models: Vec<LocalSetupModel>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct LocalSetupModel {
     id: String,
@@ -143,6 +153,13 @@ struct LocalSetupModel {
     memory_band: String,
     recommended_context: String,
     fit: LocalModelFitAssessment,
+    variant: String,
+    capabilities: Vec<String>,
+    why_recommended: String,
+    recommendation_rank: Option<u8>,
+    default_recommended: bool,
+    advanced_only: bool,
+    verified_at_32k: bool,
 }
 
 /// The selected local-model planning budget. It is intentionally distinct
@@ -154,6 +171,21 @@ struct MemoryBudgetStatus {
     effective_gb: Option<u16>,
     planning_only: bool,
     message: String,
+}
+
+/// Resolved from a physical machine in Auto mode or from an explicitly
+/// labelled manual planning profile. A manual profile never claims this Mac
+/// owns the selected resource.
+#[derive(Clone)]
+struct HardwarePlan {
+    detected_profile: HardwareProfile,
+    selected_profile: HardwareProfile,
+    effective_profile: HardwareProfile,
+    primary_fit_limit_gb: Option<u16>,
+    detected_primary_capacity_gb: Option<u16>,
+    planning_override: bool,
+    primary_fit_limit_label: String,
+    profile_label: String,
 }
 
 /// A typed, fixed action for the setup UI—not a user-provided URL or shell
@@ -314,34 +346,84 @@ fn load_or_create_config() -> Result<(PathBuf, KairosConfig), String> {
     Ok((path, config))
 }
 
+fn resolve_hardware_plan(
+    settings: &LocalSetupSettings,
+    capability: &system::MachineCapability,
+) -> HardwarePlan {
+    let selected_profile = settings.hardware_profile;
+    let detected_profile = capability.detected_hardware_profile;
+    let configured_budget = match settings.resolved_memory_budget_mode() {
+        MemoryBudgetMode::Auto => None,
+        MemoryBudgetMode::Preset | MemoryBudgetMode::Custom => settings.memory_budget_gb,
+    };
+    if selected_profile == HardwareProfile::Auto {
+        let primary_fit_limit_gb = match (capability.primary_fit_capacity_gib, configured_budget) {
+            (Some(detected), Some(cap)) => Some(detected.min(cap)),
+            (detected, None) => detected,
+            (None, _) => None,
+        };
+        return HardwarePlan {
+            detected_profile,
+            selected_profile,
+            effective_profile: detected_profile,
+            primary_fit_limit_gb,
+            detected_primary_capacity_gb: capability.primary_fit_capacity_gib,
+            planning_override: false,
+            primary_fit_limit_label: detected_profile.primary_resource_label().to_owned(),
+            profile_label: format!("{} · auto-detected", detected_profile.label()),
+        };
+    }
+    HardwarePlan {
+        detected_profile,
+        selected_profile,
+        effective_profile: selected_profile,
+        // A manual profile is intentionally a planning target. It does not
+        // consume or invent hardware on this Mac, and needs an explicit cap.
+        primary_fit_limit_gb: configured_budget,
+        detected_primary_capacity_gb: capability.primary_fit_capacity_gib,
+        planning_override: true,
+        primary_fit_limit_label: selected_profile.primary_resource_label().to_owned(),
+        profile_label: format!("{} · manual planning override", selected_profile.label()),
+    }
+}
+
 fn memory_budget_status(
     settings: &LocalSetupSettings,
-    detected_memory_gb: Option<u16>,
+    hardware: &HardwarePlan,
 ) -> MemoryBudgetStatus {
     let mode = settings.resolved_memory_budget_mode();
     let configured_gb = match &mode {
         MemoryBudgetMode::Auto => None,
         MemoryBudgetMode::Preset | MemoryBudgetMode::Custom => settings.memory_budget_gb,
     };
-    let effective_gb = settings.effective_memory_budget_gb(detected_memory_gb);
-    let message = match (mode.clone(), configured_gb, detected_memory_gb) {
-        (MemoryBudgetMode::Auto, _, Some(detected)) => format!(
-            "Auto uses {detected} GB detected on this Mac. It is planning guidance only: Kairos does not reserve memory or change Ollama's allocation."
-        ),
-        (MemoryBudgetMode::Auto, _, None) => {
-            "Auto is waiting to detect memory. It will not change the selected model or context."
-                .to_owned()
+    let effective_gb = hardware.primary_fit_limit_gb;
+    let message = if hardware.planning_override {
+        match configured_gb {
+            Some(selected) => format!(
+                "Manual {} planning override at {selected} GB. This is not detected hardware and never changes your selected model or 32K target.",
+                hardware.effective_profile.label()
+            ),
+            None => format!(
+                "Manual {} planning override selected. Choose a Memory Budget to compare models; Kairos will not claim this Mac has that hardware.",
+                hardware.effective_profile.label()
+            ),
         }
-        (_, Some(selected), Some(detected)) if selected > detected => format!(
-            "The {selected} GB planning budget is above {detected} GB detected on this Mac. It does not add memory or change Ollama; use it only to compare model tiers."
-        ),
-        (_, Some(selected), Some(detected)) => format!(
-            "Using your {selected} GB planning budget while {detected} GB is detected. It does not reserve or cap memory, switch models, or lower context."
-        ),
-        (_, Some(selected), None) => format!(
-            "Using your {selected} GB planning budget. It does not reserve or cap memory, switch models, or lower context."
-        ),
-        _ => "Memory budget needs attention before Kairos can assess local-model fit.".to_owned(),
+    } else {
+        match (configured_gb, hardware.detected_primary_capacity_gb, effective_gb) {
+            (None, Some(detected), _) => format!(
+                "Auto uses the detected {detected} GB {} limit. It is planning guidance only and never changes Ollama's allocation, model, or 32K target.",
+                hardware.primary_fit_limit_label
+            ),
+            (Some(cap), Some(detected), Some(effective)) if cap > detected => format!(
+                "Your {cap} GB preference cap is above the detected {detected} GB {} limit, so Kairos conservatively assesses {effective} GB. It does not add hardware or switch models.",
+                hardware.primary_fit_limit_label
+            ),
+            (Some(cap), Some(detected), Some(effective)) => format!(
+                "Your {cap} GB preference cap limits the detected {detected} GB {} to {effective} GB for recommendations only. It does not reserve memory or switch models.",
+                hardware.primary_fit_limit_label
+            ),
+            _ => "Auto is waiting to detect the primary local-model resource. Kairos will not change the selected model or context.".to_owned(),
+        }
     };
     MemoryBudgetStatus {
         mode,
@@ -355,10 +437,24 @@ fn memory_budget_status(
 async fn model_status(
     settings: &LocalModelSettings,
     local_setup: &LocalSetupSettings,
-    detected_memory_gb: Option<u16>,
+    capability: &system::MachineCapability,
 ) -> ModelStatus {
     let readiness = ollama_status(settings).await;
-    let memory_budget = memory_budget_status(local_setup, detected_memory_gb);
+    let hardware = resolve_hardware_plan(local_setup, capability);
+    let artifacts = local_model_artifacts(&readiness);
+    let selected_artifact = readiness
+        .resolved_model
+        .as_deref()
+        .and_then(|model| artifact_for_model(&artifacts, model));
+    let verified = local_setup
+        .matching_verification(
+            &settings.selected_model,
+            &hardware.effective_profile,
+            hardware.primary_fit_limit_gb,
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            selected_artifact,
+        )
+        .is_some();
     ModelStatus {
         endpoint: readiness.endpoint,
         selected_model: readiness.selected_model,
@@ -369,10 +465,12 @@ async fn model_status(
         installed_models: readiness.installed_models,
         setup_message: readiness.setup_message,
         choices: local_model_choices(&settings.selected_model),
-        selected_model_fit: assess_local_model_fit(
+        selected_model_fit: assess_local_model_fit_for_hardware(
             &settings.selected_model,
-            memory_budget.effective_gb,
-            settings.context_window_tokens,
+            hardware.effective_profile,
+            hardware.primary_fit_limit_gb,
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            verified,
         ),
     }
 }
@@ -397,12 +495,7 @@ async fn status() -> Result<AppStatus, String> {
     Ok(AppStatus {
         config_path: path.display().to_string(),
         initialized,
-        model: model_status(
-            &settings,
-            &local_setup,
-            capability.detected_memory_budget_gib,
-        )
-        .await,
+        model: model_status(&settings, &local_setup, &capability).await,
         app: config
             .as_ref()
             .map(|config| config.app.clone())
@@ -443,6 +536,84 @@ fn friendly_context_window(tokens: u32) -> String {
     }
 }
 
+fn same_ollama_model_id(left: &str, right: &str) -> bool {
+    left.trim().trim_end_matches(":latest") == right.trim().trim_end_matches(":latest")
+}
+
+fn local_model_artifact_from_installed(
+    installed: &kairos_core::InstalledModel,
+) -> Option<LocalModelArtifact> {
+    let digest = installed.digest.as_ref()?.trim();
+    let quantization = installed.quantization.as_ref()?.trim();
+    if installed.id.trim().is_empty() || digest.is_empty() || quantization.is_empty() {
+        return None;
+    }
+    Some(LocalModelArtifact {
+        resolved_model: installed.id.clone(),
+        digest: digest.to_owned(),
+        quantization: quantization.to_owned(),
+    })
+}
+
+fn local_model_artifacts(readiness: &kairos_core::OllamaStatus) -> Vec<LocalModelArtifact> {
+    readiness
+        .installed_model_sizes
+        .iter()
+        .filter_map(local_model_artifact_from_installed)
+        .collect()
+}
+
+fn artifact_for_model<'a>(
+    artifacts: &'a [LocalModelArtifact],
+    model: &str,
+) -> Option<&'a LocalModelArtifact> {
+    artifacts
+        .iter()
+        // Verification requires the exact installed tag, not merely the
+        // `:latest` family alias used elsewhere for selection convenience.
+        .find(|artifact| artifact.resolved_model == model.trim())
+}
+
+fn local_setup_model_from_recommendation(
+    recommendation: kairos_core::LocalModelRecommendation,
+    readiness: &kairos_core::OllamaStatus,
+) -> LocalSetupModel {
+    let profile = recommendation.profile;
+    let installed_model = readiness
+        .installed_model_sizes
+        .iter()
+        .find(|installed| same_ollama_model_id(&installed.id, &profile.id));
+    let installed = installed_model.is_some();
+    LocalSetupModel {
+        id: profile.id.clone(),
+        label: profile.label.clone(),
+        role: profile.role.clone(),
+        installed,
+        download_size: friendly_model_size(
+            installed_model.and_then(|installed| installed.size_bytes),
+            &profile,
+        ),
+        // Deliberately not a RAM/VRAM claim. The fit assessment is the sole
+        // source of hardware guidance and carries the conservative 32K tier.
+        memory_band: "Fit assessed separately for the selected hardware profile".to_owned(),
+        recommended_context: format!(
+            "32K target · supports up to {}",
+            profile
+                .maximum_context_tokens
+                .map(friendly_context_window)
+                .unwrap_or_else(|| "its Ollama-reported limit".to_owned())
+        ),
+        fit: recommendation.fit.clone(),
+        variant: profile.quantization.clone(),
+        capabilities: profile.capabilities.clone(),
+        why_recommended: recommendation.why_recommended.clone(),
+        recommendation_rank: recommendation.recommendation_rank,
+        default_recommended: recommendation.default_recommended,
+        advanced_only: recommendation.advanced_only,
+        verified_at_32k: recommendation.fit.verified_at_32k,
+    }
+}
+
 async fn local_setup() -> Result<LocalSetupStatus, String> {
     let path = config_path()?;
     let (settings, setup_settings) = if path.exists() {
@@ -453,56 +624,30 @@ async fn local_setup() -> Result<LocalSetupStatus, String> {
     };
     let readiness = ollama_status(&settings).await;
     let capability = system::machine_capability();
-    let memory_budget =
-        memory_budget_status(&setup_settings, capability.detected_memory_budget_gib);
-    let installed_sizes = readiness
-        .installed_model_sizes
-        .iter()
-        .map(|model| (model.id.as_str(), model.size_bytes))
-        .collect::<HashMap<_, _>>();
-    let models = local_model_profiles()
+    let hardware = resolve_hardware_plan(&setup_settings, &capability);
+    let memory_budget = memory_budget_status(&setup_settings, &hardware);
+    let artifacts = local_model_artifacts(&readiness);
+    let recommendations = local_model_recommendations(
+        hardware.effective_profile,
+        hardware.primary_fit_limit_gb,
+        DEFAULT_CONTEXT_WINDOW_TOKENS,
+        &setup_settings,
+        &artifacts,
+    );
+    let models = recommendations
         .into_iter()
-        .map(|profile| {
-            let resolved = readiness.installed_models.iter().any(|installed| {
-                installed == &profile.id || installed == &format!("{}:latest", profile.id)
-            });
-            let fit = assess_local_model_fit(
-                &profile.id,
-                memory_budget.effective_gb,
-                settings.context_window_tokens,
-            );
-            LocalSetupModel {
-                id: profile.id.clone(),
-                label: profile.label.clone(),
-                role: profile.role.clone(),
-                installed: resolved,
-                download_size: friendly_model_size(
-                    installed_sizes.get(profile.id.as_str()).copied().flatten(),
-                    &profile,
-                ),
-                memory_band: format!(
-                    "{} GB minimum · {} GB recommended",
-                    profile.minimum_memory_gb, profile.recommended_memory_gb
-                ),
-                recommended_context: profile
-                    .maximum_context_tokens
-                    .map(|maximum| {
-                        format!(
-                            "Up to {} · Kairos set to {}",
-                            friendly_context_window(maximum),
-                            friendly_context_window(settings.context_window_tokens)
-                        )
-                    })
-                    .unwrap_or_else(|| {
-                        format!(
-                            "Kairos set to {}",
-                            friendly_context_window(settings.context_window_tokens)
-                        )
-                    }),
-                fit,
-            }
-        })
-        .collect();
+        .map(|recommendation| local_setup_model_from_recommendation(recommendation, &readiness))
+        .collect::<Vec<_>>();
+    let recommended_models = models
+        .iter()
+        .filter(|model| model.default_recommended && !model.advanced_only)
+        .cloned()
+        .collect::<Vec<_>>();
+    let advanced_models = models
+        .iter()
+        .filter(|model| model.advanced_only)
+        .cloned()
+        .collect::<Vec<_>>();
     let ollama_installed = system::ollama_is_installed();
     let setup_message = if !ollama_installed {
         Some(
@@ -517,11 +662,18 @@ async fn local_setup() -> Result<LocalSetupStatus, String> {
         ollama_installed,
         running: readiness.running,
         endpoint: settings.ollama_endpoint,
-        detected_memory_gb: capability.detected_memory_budget_gib,
+        detected_memory_gb: capability.unified_memory_gib,
+        detected_hardware_profile: hardware.detected_profile,
+        selected_hardware_profile: hardware.selected_profile,
+        effective_hardware_profile: hardware.effective_profile,
+        hardware_profile_label: hardware.profile_label,
+        primary_fit_limit_gb: hardware.primary_fit_limit_gb,
+        primary_fit_limit_label: hardware.primary_fit_limit_label,
+        hardware_planning_override: hardware.planning_override,
         available_disk_gb: capability
             .free_disk_bytes
             .map(|bytes| bytes / 1024_u64.pow(3)),
-        context_window_tokens: settings.context_window_tokens,
+        context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
         memory_budget_mode: memory_budget.mode,
         memory_budget_gb: memory_budget.configured_gb,
         effective_memory_budget_gb: memory_budget.effective_gb,
@@ -535,12 +687,27 @@ async fn local_setup() -> Result<LocalSetupStatus, String> {
             official_url: system::OLLAMA_MACOS_DOWNLOAD_URL.to_owned(),
             needed: !ollama_installed,
         },
-        selected_model_fit: assess_local_model_fit(
+        selected_model_fit: assess_local_model_fit_for_hardware(
             &settings.selected_model,
-            memory_budget.effective_gb,
-            settings.context_window_tokens,
+            hardware.effective_profile,
+            hardware.primary_fit_limit_gb,
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            setup_settings
+                .matching_verification(
+                    &settings.selected_model,
+                    &hardware.effective_profile,
+                    hardware.primary_fit_limit_gb,
+                    DEFAULT_CONTEXT_WINDOW_TOKENS,
+                    readiness
+                        .resolved_model
+                        .as_deref()
+                        .and_then(|model| artifact_for_model(&artifacts, model)),
+                )
+                .is_some(),
         ),
         models,
+        recommended_models,
+        advanced_models,
     })
 }
 
@@ -567,6 +734,19 @@ async fn set_memory_budget(
         .local_setup
         .set_memory_budget(memory_budget_mode, memory_budget_gb)
         .map_err(|error| error.to_string())?;
+    config.ensure_current_version();
+    write_config(&path, &config, true).map_err(|error| error.to_string())?;
+    local_setup().await
+}
+
+/// Persist only the selected planning profile. It never changes the local
+/// model, its context setting, or the physical machine's allocation.
+#[tauri::command]
+async fn set_hardware_profile(
+    hardware_profile: HardwareProfile,
+) -> Result<LocalSetupStatus, String> {
+    let (path, mut config) = load_or_create_config()?;
+    config.local_setup.set_hardware_profile(hardware_profile);
     config.ensure_current_version();
     write_config(&path, &config, true).map_err(|error| error.to_string())?;
     local_setup().await
@@ -646,16 +826,74 @@ fn cancel_ollama_pull(state: State<'_, AppState>, model: String) -> Result<(), S
 }
 
 #[tauri::command]
-async fn test_ollama_model(model: String) -> Result<kairos_core::OllamaModelTest, String> {
-    let path = config_path()?;
-    let settings = if path.exists() {
-        load_app_config(&path)?.local_model
-    } else {
-        LocalModelSettings::default()
-    };
-    test_local_ollama_model(&settings, &model)
+async fn test_ollama_model(
+    model: String,
+    context_window_tokens: Option<u32>,
+) -> Result<kairos_core::OllamaModelTest, String> {
+    if context_window_tokens.is_some_and(|tokens| tokens != DEFAULT_CONTEXT_WINDOW_TOKENS) {
+        return Err("Kairos setup verification is fixed at 32K. It does not silently lower or substitute context.".to_owned());
+    }
+    let (path, mut config) = load_or_create_config()?;
+    let mut result = test_local_ollama_model(&config.local_model, &model)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    let capability = system::machine_capability();
+    let hardware = resolve_hardware_plan(&config.local_setup, &capability);
+    let can_verify_current_plan = !hardware.planning_override
+        && hardware.primary_fit_limit_gb.is_some()
+        && hardware.primary_fit_limit_gb == capability.primary_fit_capacity_gib
+        && hardware.effective_profile == capability.detected_hardware_profile;
+    let artifact = match (
+        result.installed_digest.as_deref().map(str::trim),
+        result.installed_quantization.as_deref().map(str::trim),
+    ) {
+        (Some(digest), Some(quantization)) if !digest.is_empty() && !quantization.is_empty() => {
+            Some(LocalModelArtifact {
+                resolved_model: result.resolved_model.clone(),
+                digest: digest.to_owned(),
+                quantization: quantization.to_owned(),
+            })
+        }
+        _ => None,
+    };
+    let catalog_quantization_matches = artifact.as_ref().is_some_and(|artifact| {
+        local_model_profile(&result.resolved_model).is_none_or(|profile| {
+            artifact
+                .quantization
+                .eq_ignore_ascii_case(profile.quantization.trim())
+        })
+    });
+    if can_verify_current_plan && catalog_quantization_matches {
+        let effective_capacity_gb = hardware.primary_fit_limit_gb.expect("checked above");
+        let artifact = artifact.expect("checked by catalog_quantization_matches");
+        config
+            .local_setup
+            .record_verification(LocalModelVerification {
+                model: result.resolved_model.clone(),
+                resolved_model: result.resolved_model.clone(),
+                digest: artifact.digest,
+                quantization: artifact.quantization,
+                hardware_profile: hardware.effective_profile,
+                effective_capacity_gb,
+                context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+                verified_at_unix_seconds: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs(),
+            });
+        config.ensure_current_version();
+        write_config(&path, &config, true).map_err(|error| error.to_string())?;
+        result
+            .message
+            .push_str(" Kairos marked this exact local 32K configuration verified.");
+    } else if artifact.is_none() {
+        result.message.push_str(" Ollama did not provide an exact digest and quantization for this installed artifact, so Kairos did not mark it verified.");
+    } else if !catalog_quantization_matches {
+        result.message.push_str(" The installed artifact's quantization does not match Kairos's exact catalog profile, so it remains Advanced rather than being marked verified.");
+    } else {
+        result.message.push_str(" The load passed on this Mac, but Kairos did not mark the selected planning override or lower preference cap as verified.");
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -2085,6 +2323,7 @@ pub fn run() {
             app_status,
             local_setup_status,
             set_memory_budget,
+            set_hardware_profile,
             initialize_tharm_profile,
             set_selected_model,
             pull_ollama_model,
@@ -2111,4 +2350,58 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Kairos");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn apple_capability(memory_gb: u16) -> system::MachineCapability {
+        system::MachineCapability {
+            architecture: "aarch64".to_owned(),
+            detected_hardware_profile: HardwareProfile::AppleUnified,
+            unified_memory_bytes: Some(memory_gb as u64 * 1024_u64.pow(3)),
+            unified_memory_gib: Some(memory_gb),
+            nvidia_vram_gib: None,
+            free_disk_bytes: None,
+            primary_fit_capacity_gib: Some(memory_gb),
+            detected_memory_budget_gib: Some(memory_gb),
+        }
+    }
+
+    #[test]
+    fn auto_profile_caps_a_large_preference_at_detected_apple_memory() {
+        let mut setup = LocalSetupSettings::default();
+        setup
+            .set_memory_budget(MemoryBudgetMode::Preset, Some(96))
+            .unwrap();
+        let local_model = LocalModelSettings::default();
+
+        let plan = resolve_hardware_plan(&setup, &apple_capability(48));
+
+        assert_eq!(plan.effective_profile, HardwareProfile::AppleUnified);
+        assert_eq!(plan.primary_fit_limit_gb, Some(48));
+        assert!(!plan.planning_override);
+        assert_eq!(local_model.selected_model, kairos_core::DEFAULT_LOCAL_MODEL);
+        assert_eq!(
+            local_model.context_window_tokens,
+            DEFAULT_CONTEXT_WINDOW_TOKENS
+        );
+    }
+
+    #[test]
+    fn manual_nvidia_profile_is_a_planning_override_not_detected_hardware() {
+        let mut setup = LocalSetupSettings::default();
+        setup.set_hardware_profile(HardwareProfile::NvidiaVram);
+        setup
+            .set_memory_budget(MemoryBudgetMode::Preset, Some(24))
+            .unwrap();
+
+        let plan = resolve_hardware_plan(&setup, &apple_capability(48));
+
+        assert_eq!(plan.detected_profile, HardwareProfile::AppleUnified);
+        assert_eq!(plan.effective_profile, HardwareProfile::NvidiaVram);
+        assert_eq!(plan.primary_fit_limit_gb, Some(24));
+        assert!(plan.planning_override);
+    }
 }

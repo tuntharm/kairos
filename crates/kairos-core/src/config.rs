@@ -36,7 +36,7 @@ pub enum WritePolicy {
 pub const DEFAULT_OLLAMA_ENDPOINT: &str = "http://localhost:11434";
 pub const DEFAULT_LOCAL_MODEL: &str = "qwen3.6:35b-mlx";
 pub const FAST_ROUTER_MODEL: &str = "qwen3:8b";
-pub const OPTIONAL_LOCAL_MODELS: [&str; 2] = ["gpt-oss:20b", "glm-4.7-flash"];
+pub const OPTIONAL_LOCAL_MODELS: [&str; 2] = ["gpt-oss:20b", "glm-4.7-flash:latest"];
 pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 32_768;
 pub const CURRENT_CONFIG_VERSION: u32 = 3;
 /// The explicit values offered by Kairos's macOS local-model setup. These are
@@ -54,7 +54,7 @@ fn default_active_provider_id() -> String {
     "ollama-local".to_owned()
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SummonTarget {
     #[default]
@@ -197,6 +197,73 @@ pub enum MemoryBudgetMode {
     Custom,
 }
 
+/// Which resource Kairos should use as the primary local-model fit limit.
+/// `Auto` always resolves to the detected machine type; the other variants
+/// are deliberately planning overrides and never claim that the current
+/// machine has that resource.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HardwareProfile {
+    #[default]
+    Auto,
+    AppleUnified,
+    NvidiaVram,
+    CpuOnly,
+}
+
+impl HardwareProfile {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::AppleUnified => "Apple Unified",
+            Self::NvidiaVram => "NVIDIA VRAM",
+            Self::CpuOnly => "CPU-only",
+        }
+    }
+
+    pub fn primary_resource_label(&self) -> &'static str {
+        match self {
+            Self::Auto => "detected primary memory",
+            Self::AppleUnified => "Apple unified memory",
+            Self::NvidiaVram => "NVIDIA VRAM",
+            Self::CpuOnly => "CPU system RAM",
+        }
+    }
+}
+
+/// A successful real local load at the requested resource tier. The key is
+/// intentionally exact: catalog tag, effective hardware profile, effective
+/// capacity, and context all have to match before a test-required model can
+/// graduate out of the advanced catalog.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalModelVerification {
+    pub model: String,
+    pub resolved_model: String,
+    /// Ollama manifest digest for the exact installed artifact. Empty legacy
+    /// records are intentionally not considered verified.
+    #[serde(default)]
+    pub digest: String,
+    /// Exact catalog quantization/profile identity that was verified. Older
+    /// records deserialize as empty and intentionally do not promote a model.
+    #[serde(default)]
+    pub quantization: String,
+    pub hardware_profile: HardwareProfile,
+    pub effective_capacity_gb: u16,
+    pub context_window_tokens: u32,
+    pub verified_at_unix_seconds: u64,
+}
+
+/// A concrete locally installed Ollama artifact. Verification is deliberately
+/// bound to this runtime identity rather than a mutable family name such as
+/// `:latest`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalModelArtifact {
+    pub resolved_model: String,
+    pub digest: String,
+    pub quantization: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalSetupSettings {
@@ -209,6 +276,14 @@ pub struct LocalSetupSettings {
     /// lets the WebView restore Auto faithfully after an app restart.
     #[serde(default)]
     pub memory_budget_mode: MemoryBudgetMode,
+    /// `Auto` uses the detected machine. A manual profile is a clearly
+    /// labelled planning override and uses an explicit chosen budget.
+    #[serde(default)]
+    pub hardware_profile: HardwareProfile,
+    /// Successful real 32K loads. This is local capability metadata only;
+    /// recording it never selects a model or changes the context window.
+    #[serde(default)]
+    pub verified_models: Vec<LocalModelVerification>,
 }
 
 impl Default for LocalSetupSettings {
@@ -216,6 +291,8 @@ impl Default for LocalSetupSettings {
         Self {
             memory_budget_gb: None,
             memory_budget_mode: MemoryBudgetMode::Auto,
+            hardware_profile: HardwareProfile::Auto,
+            verified_models: Vec::new(),
         }
     }
 }
@@ -240,9 +317,24 @@ impl LocalSetupSettings {
     }
 
     pub fn effective_memory_budget_gb(&self, detected_memory_gb: Option<u16>) -> Option<u16> {
-        match self.resolved_memory_budget_mode() {
-            MemoryBudgetMode::Auto => detected_memory_gb,
+        let configured_cap = match self.resolved_memory_budget_mode() {
+            MemoryBudgetMode::Auto => None,
             MemoryBudgetMode::Preset | MemoryBudgetMode::Custom => self.memory_budget_gb,
+        };
+        match self.hardware_profile {
+            // Auto is an actual-machine mode: a preference can only reduce a
+            // detected primary resource, never turn 48 GB into a 96 GB fit.
+            HardwareProfile::Auto => match (detected_memory_gb, configured_cap) {
+                (Some(detected), Some(cap)) => Some(detected.min(cap)),
+                (detected, None) => detected,
+                (None, _) => None,
+            },
+            // Manual profiles are explicitly hypothetical planning targets.
+            // Their capacity comes from the chosen cap and is never claimed
+            // to be the physical machine's memory.
+            HardwareProfile::AppleUnified
+            | HardwareProfile::NvidiaVram
+            | HardwareProfile::CpuOnly => configured_cap,
         }
     }
 
@@ -292,6 +384,70 @@ impl LocalSetupSettings {
         self.memory_budget_mode = mode;
         self.memory_budget_gb = memory_budget_gb;
         Ok(())
+    }
+
+    pub fn set_hardware_profile(&mut self, hardware_profile: HardwareProfile) {
+        self.hardware_profile = hardware_profile;
+    }
+
+    pub fn matching_verification(
+        &self,
+        model: &str,
+        hardware_profile: &HardwareProfile,
+        effective_capacity_gb: Option<u16>,
+        context_window_tokens: u32,
+        artifact: Option<&LocalModelArtifact>,
+    ) -> Option<&LocalModelVerification> {
+        let effective_capacity_gb = effective_capacity_gb?;
+        let artifact = artifact?;
+        if artifact.resolved_model.trim().is_empty()
+            || artifact.digest.trim().is_empty()
+            || artifact.quantization.trim().is_empty()
+        {
+            return None;
+        }
+        let expected_quantization =
+            local_model_profile_spec(model).map(|profile| profile.quantization);
+        if expected_quantization
+            .is_some_and(|expected| !quantization_matches(&artifact.quantization, expected))
+        {
+            return None;
+        }
+        self.verified_models.iter().find(|verification| {
+            // A legacy record that only carried an untagged name, or one
+            // without a digest/manifest quantization, must not promote a
+            // mutable new pull into the default list.
+            verification.resolved_model == artifact.resolved_model
+                && verification.digest == artifact.digest
+                && quantization_matches(&verification.quantization, &artifact.quantization)
+                && expected_quantization.is_none_or(|expected| {
+                    quantization_matches(&verification.quantization, expected)
+                })
+                && verification.hardware_profile == *hardware_profile
+                && verification.effective_capacity_gb == effective_capacity_gb
+                && verification.context_window_tokens == context_window_tokens
+        })
+    }
+
+    pub fn record_verification(&mut self, verification: LocalModelVerification) {
+        self.verified_models.retain(|existing| {
+            !(model_ids_match(&existing.model, &verification.model)
+                && existing.resolved_model == verification.resolved_model
+                && existing.digest == verification.digest
+                && existing.quantization == verification.quantization
+                && existing.hardware_profile == verification.hardware_profile
+                && existing.effective_capacity_gb == verification.effective_capacity_gb
+                && existing.context_window_tokens == verification.context_window_tokens)
+        });
+        self.verified_models.push(verification);
+        // This is small, human-readable settings metadata rather than an
+        // unbounded history. Keep the newest entries if tests are repeated.
+        if self.verified_models.len() > 64 {
+            self.verified_models
+                .sort_by_key(|item| item.verified_at_unix_seconds);
+            let to_remove = self.verified_models.len() - 64;
+            self.verified_models.drain(0..to_remove);
+        }
     }
 }
 
@@ -373,17 +529,17 @@ pub struct LocalModelChoice {
     pub role: String,
 }
 
-/// Fixed, transparent metadata for the deliberately small alpha catalog.
-/// `minimum_memory_gb` and `recommended_memory_gb` are Kairos fit guidance
-/// for the 32K target (including practical macOS headroom), not vendor
-/// hardware guarantees. Ollama reports the actual installed package size at
-/// runtime and takes precedence over `package_size_bytes` in the desktop UI.
+/// Fixed metadata for exact Ollama tags. Package size is intentionally
+/// display-only: the hardware fit table below reserves separate 32K headroom
+/// and is never inferred from download size.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalModelProfile {
     pub id: String,
     pub label: String,
     pub role: String,
+    pub quantization: String,
+    pub capabilities: Vec<String>,
     pub package_size_bytes: Option<u64>,
     pub minimum_memory_gb: u16,
     pub recommended_memory_gb: u16,
@@ -409,183 +565,507 @@ pub struct LocalModelFitAssessment {
     pub context_window_tokens: u32,
     pub maximum_context_tokens: Option<u32>,
     pub context_compatible: Option<bool>,
-    /// A fit estimate is deliberately not treated as proof of real-world
-    /// performance. Large / newer packages expose this so the UI can ask for
-    /// the explicit local model test before presenting them as ready.
     pub requires_test: bool,
+    pub verified_at_32k: bool,
+    pub hardware_profile: HardwareProfile,
     pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalModelRecommendation {
+    pub profile: LocalModelProfile,
+    pub fit: LocalModelFitAssessment,
+    pub default_recommended: bool,
+    pub advanced_only: bool,
+    pub why_recommended: String,
+    pub recommendation_rank: Option<u8>,
+}
+
+#[derive(Clone, Copy)]
+struct MemoryRequirement {
+    minimum_gb: u16,
+    comfortable_gb: u16,
+}
+
+#[derive(Clone, Copy)]
+struct HardwareFitTable {
+    apple_unified: Option<MemoryRequirement>,
+    nvidia_vram: Option<MemoryRequirement>,
+    cpu_only: Option<MemoryRequirement>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RecommendationRole {
+    Fast,
+    Balanced,
+    Reasoning,
+    Specialist,
 }
 
 #[derive(Clone, Copy)]
 struct LocalModelProfileSpec {
     id: &'static str,
+    aliases: &'static [&'static str],
     label: &'static str,
     role: &'static str,
+    recommendation_role: RecommendationRole,
+    quality_rank: u8,
+    quantization: &'static str,
+    capabilities: &'static [&'static str],
+    why_recommended: &'static str,
     package_size_bytes: u64,
-    minimum_memory_gb: u16,
-    recommended_memory_gb: u16,
+    fits: HardwareFitTable,
     maximum_context_tokens: u32,
-    requires_test: bool,
+    requires_verification: bool,
 }
 
 const LOCAL_MODEL_PROFILE_SPECS: [LocalModelProfileSpec; 14] = [
     LocalModelProfileSpec {
         id: FAST_ROUTER_MODEL,
+        aliases: &[],
         label: "Qwen 3 8B",
-        role: "Fast chat, routing, and summaries",
+        role: "Fast everyday chat and routing",
+        recommendation_role: RecommendationRole::Fast,
+        quality_rank: 1,
+        quantization: "Q4_K_M",
+        capabilities: &["Text", "Routing", "Summaries"],
+        why_recommended: "The lightest conservative 32K option for fast everyday chat and routing.",
         package_size_bytes: 5_200_000_000,
-        minimum_memory_gb: 16,
-        recommended_memory_gb: 16,
+        fits: HardwareFitTable {
+            apple_unified: Some(MemoryRequirement {
+                minimum_gb: 12,
+                comfortable_gb: 16,
+            }),
+            nvidia_vram: Some(MemoryRequirement {
+                minimum_gb: 12,
+                comfortable_gb: 16,
+            }),
+            cpu_only: Some(MemoryRequirement {
+                minimum_gb: 20,
+                comfortable_gb: 24,
+            }),
+        },
         maximum_context_tokens: 40_000,
-        requires_test: false,
+        requires_verification: false,
     },
     LocalModelProfileSpec {
         id: "gemma3:12b",
+        aliases: &[],
         label: "Gemma 3 12B",
-        role: "Documents and vision-capable general assistant",
+        role: "Balanced vision and document assistant",
+        recommendation_role: RecommendationRole::Specialist,
+        quality_rank: 2,
+        quantization: "Q4_K_M",
+        capabilities: &["Text", "Vision", "Documents"],
+        why_recommended: "A compact multimodal choice for documents and image-aware work.",
         package_size_bytes: 8_100_000_000,
-        minimum_memory_gb: 24,
-        recommended_memory_gb: 24,
+        fits: HardwareFitTable {
+            apple_unified: Some(MemoryRequirement {
+                minimum_gb: 20,
+                comfortable_gb: 24,
+            }),
+            nvidia_vram: Some(MemoryRequirement {
+                minimum_gb: 14,
+                comfortable_gb: 16,
+            }),
+            cpu_only: Some(MemoryRequirement {
+                minimum_gb: 28,
+                comfortable_gb: 32,
+            }),
+        },
         maximum_context_tokens: 131_072,
-        requires_test: false,
+        requires_verification: false,
     },
     LocalModelProfileSpec {
         id: "qwen3:14b",
+        aliases: &[],
         label: "Qwen 3 14B",
-        role: "Everyday reasoning with more headroom than 8B",
+        role: "Balanced general assistant",
+        recommendation_role: RecommendationRole::Balanced,
+        quality_rank: 2,
+        quantization: "Q4_K_M",
+        capabilities: &["Text", "Reasoning"],
+        why_recommended: "A stronger everyday text model without moving into the large-model tier.",
         package_size_bytes: 9_300_000_000,
-        minimum_memory_gb: 24,
-        recommended_memory_gb: 24,
+        fits: HardwareFitTable {
+            apple_unified: Some(MemoryRequirement {
+                minimum_gb: 20,
+                comfortable_gb: 24,
+            }),
+            nvidia_vram: Some(MemoryRequirement {
+                minimum_gb: 14,
+                comfortable_gb: 16,
+            }),
+            cpu_only: Some(MemoryRequirement {
+                minimum_gb: 28,
+                comfortable_gb: 32,
+            }),
+        },
         maximum_context_tokens: 40_000,
-        requires_test: false,
+        requires_verification: false,
     },
     LocalModelProfileSpec {
         id: OPTIONAL_LOCAL_MODELS[0],
+        aliases: &[],
         label: "GPT-OSS 20B",
-        role: "Reasoning, structured work, and tools",
+        role: "Strong reasoning and structured work",
+        recommendation_role: RecommendationRole::Reasoning,
+        quality_rank: 3,
+        quantization: "MXFP4",
+        capabilities: &["Text", "Reasoning", "Tools", "Structured output"],
+        why_recommended: "The first comfortably fitting reasoning and tools step above everyday models.",
         package_size_bytes: 14_000_000_000,
-        minimum_memory_gb: 24,
-        recommended_memory_gb: 24,
+        fits: HardwareFitTable {
+            apple_unified: Some(MemoryRequirement {
+                minimum_gb: 28,
+                comfortable_gb: 32,
+            }),
+            nvidia_vram: Some(MemoryRequirement {
+                minimum_gb: 20,
+                comfortable_gb: 24,
+            }),
+            cpu_only: Some(MemoryRequirement {
+                minimum_gb: 40,
+                comfortable_gb: 48,
+            }),
+        },
         maximum_context_tokens: 131_072,
-        requires_test: false,
+        requires_verification: false,
     },
     LocalModelProfileSpec {
         id: "qwen3.6:27b",
+        aliases: &[],
         label: "Qwen 3.6 27B",
-        role: "Stronger local general and vision-capable work",
+        role: "Higher-quality general and vision work",
+        recommendation_role: RecommendationRole::Balanced,
+        quality_rank: 4,
+        quantization: "Q4_K_M",
+        capabilities: &["Text", "Vision", "Coding"],
+        why_recommended: "A stronger all-round Apple or GPU option when the 32K plan has real headroom.",
         package_size_bytes: 17_000_000_000,
-        minimum_memory_gb: 32,
-        recommended_memory_gb: 32,
+        fits: HardwareFitTable {
+            apple_unified: Some(MemoryRequirement {
+                minimum_gb: 40,
+                comfortable_gb: 48,
+            }),
+            nvidia_vram: Some(MemoryRequirement {
+                minimum_gb: 28,
+                comfortable_gb: 32,
+            }),
+            cpu_only: Some(MemoryRequirement {
+                minimum_gb: 52,
+                comfortable_gb: 64,
+            }),
+        },
         maximum_context_tokens: 262_144,
-        requires_test: false,
+        requires_verification: false,
     },
     LocalModelProfileSpec {
         id: "mistral-small3.2:24b",
+        aliases: &[],
         label: "Mistral Small 3.2 24B",
-        role: "Tool calling, documents, and agent workflows",
+        role: "Tools, vision, and document workflows",
+        recommendation_role: RecommendationRole::Specialist,
+        quality_rank: 4,
+        quantization: "Q4_K_M",
+        capabilities: &["Text", "Vision", "Tools", "Documents"],
+        why_recommended: "A specialist for robust tool calls, documents, and image-aware workflows.",
         package_size_bytes: 15_000_000_000,
-        minimum_memory_gb: 32,
-        recommended_memory_gb: 32,
+        fits: HardwareFitTable {
+            apple_unified: Some(MemoryRequirement {
+                minimum_gb: 40,
+                comfortable_gb: 48,
+            }),
+            nvidia_vram: Some(MemoryRequirement {
+                minimum_gb: 24,
+                comfortable_gb: 32,
+            }),
+            cpu_only: Some(MemoryRequirement {
+                minimum_gb: 44,
+                comfortable_gb: 56,
+            }),
+        },
         maximum_context_tokens: 131_072,
-        requires_test: false,
+        requires_verification: false,
     },
     LocalModelProfileSpec {
         id: "gemma3:27b",
+        aliases: &[],
         label: "Gemma 3 27B",
-        role: "Higher-quality documents and vision",
+        role: "High-quality vision and documents",
+        recommendation_role: RecommendationRole::Specialist,
+        quality_rank: 4,
+        quantization: "Q4_K_M",
+        capabilities: &["Text", "Vision", "Documents"],
+        why_recommended: "The stronger document and vision choice once the 32K plan has comfortable headroom.",
         package_size_bytes: 17_000_000_000,
-        minimum_memory_gb: 32,
-        recommended_memory_gb: 32,
+        fits: HardwareFitTable {
+            apple_unified: Some(MemoryRequirement {
+                minimum_gb: 40,
+                comfortable_gb: 48,
+            }),
+            nvidia_vram: Some(MemoryRequirement {
+                minimum_gb: 28,
+                comfortable_gb: 32,
+            }),
+            cpu_only: Some(MemoryRequirement {
+                minimum_gb: 52,
+                comfortable_gb: 64,
+            }),
+        },
         maximum_context_tokens: 131_072,
-        requires_test: false,
+        requires_verification: false,
     },
     LocalModelProfileSpec {
         id: "qwen3:30b",
+        aliases: &[],
         label: "Qwen 3 30B",
         role: "Research synthesis and reasoning",
+        recommendation_role: RecommendationRole::Reasoning,
+        quality_rank: 4,
+        quantization: "Q4_K_M",
+        capabilities: &["Text", "Reasoning", "Research"],
+        why_recommended: "A larger reasoning option for research synthesis when it comfortably fits at 32K.",
         package_size_bytes: 19_000_000_000,
-        minimum_memory_gb: 32,
-        recommended_memory_gb: 32,
+        fits: HardwareFitTable {
+            apple_unified: Some(MemoryRequirement {
+                minimum_gb: 40,
+                comfortable_gb: 48,
+            }),
+            nvidia_vram: Some(MemoryRequirement {
+                minimum_gb: 28,
+                comfortable_gb: 32,
+            }),
+            cpu_only: Some(MemoryRequirement {
+                minimum_gb: 56,
+                comfortable_gb: 64,
+            }),
+        },
         maximum_context_tokens: 262_144,
-        requires_test: false,
+        requires_verification: false,
     },
     LocalModelProfileSpec {
         id: "qwen3:32b",
+        aliases: &[],
         label: "Qwen 3 32B",
         role: "Higher-quality dense reasoning",
+        recommendation_role: RecommendationRole::Reasoning,
+        quality_rank: 5,
+        quantization: "Q4_K_M",
+        capabilities: &["Text", "Reasoning"],
+        why_recommended: "The strongest dense Qwen reasoning model in the standard 32K shortlist tier.",
         package_size_bytes: 20_000_000_000,
-        minimum_memory_gb: 48,
-        recommended_memory_gb: 48,
+        fits: HardwareFitTable {
+            apple_unified: Some(MemoryRequirement {
+                minimum_gb: 40,
+                comfortable_gb: 48,
+            }),
+            nvidia_vram: Some(MemoryRequirement {
+                minimum_gb: 30,
+                comfortable_gb: 32,
+            }),
+            cpu_only: Some(MemoryRequirement {
+                minimum_gb: 56,
+                comfortable_gb: 64,
+            }),
+        },
         maximum_context_tokens: 40_000,
-        requires_test: false,
+        requires_verification: false,
     },
     LocalModelProfileSpec {
         id: DEFAULT_LOCAL_MODEL,
+        aliases: &[],
         label: "Qwen 3.6 35B MLX",
-        role: "Default local model",
+        role: "Strong Apple-Silicon reasoning and coding",
+        recommendation_role: RecommendationRole::Reasoning,
+        quality_rank: 6,
+        quantization: "NVFP4",
+        capabilities: &["Text", "Vision", "Coding", "Reasoning"],
+        why_recommended: "The preferred strong Apple-Silicon option once 48 GB unified memory comfortably covers a 32K chat.",
         package_size_bytes: 22_000_000_000,
-        minimum_memory_gb: 32,
-        recommended_memory_gb: 48,
+        fits: HardwareFitTable {
+            apple_unified: Some(MemoryRequirement {
+                minimum_gb: 40,
+                comfortable_gb: 48,
+            }),
+            nvidia_vram: None,
+            cpu_only: None,
+        },
         maximum_context_tokens: 262_144,
-        requires_test: false,
+        requires_verification: false,
     },
     LocalModelProfileSpec {
-        id: OPTIONAL_LOCAL_MODELS[1],
+        id: "glm-4.7-flash:latest",
+        aliases: &["glm-4.7-flash"],
         label: "GLM 4.7 Flash",
-        role: "Local agent and coding model",
+        role: "Coding and local agent specialist",
+        recommendation_role: RecommendationRole::Specialist,
+        quality_rank: 5,
+        quantization: "Q4_K_M",
+        capabilities: &["Text", "Coding", "Tools", "Agents"],
+        why_recommended: "A strong local coding and agent specialist after a real 32K test on a compatible Ollama build.",
         package_size_bytes: 19_000_000_000,
-        minimum_memory_gb: 32,
-        recommended_memory_gb: 32,
+        fits: HardwareFitTable {
+            apple_unified: Some(MemoryRequirement {
+                minimum_gb: 40,
+                comfortable_gb: 48,
+            }),
+            nvidia_vram: Some(MemoryRequirement {
+                minimum_gb: 30,
+                comfortable_gb: 32,
+            }),
+            cpu_only: Some(MemoryRequirement {
+                minimum_gb: 56,
+                comfortable_gb: 64,
+            }),
+        },
         maximum_context_tokens: 198_000,
-        requires_test: true,
+        requires_verification: true,
     },
     LocalModelProfileSpec {
         id: "llama3.3:70b",
+        aliases: &[],
         label: "Llama 3.3 70B",
         role: "Heavy general-purpose assistant",
+        recommendation_role: RecommendationRole::Reasoning,
+        quality_rank: 7,
+        quantization: "Q4_K_M",
+        capabilities: &["Text", "Reasoning", "Tools"],
+        why_recommended: "A large multilingual general model, kept advanced until this exact 32K configuration passes a local test.",
         package_size_bytes: 43_000_000_000,
-        minimum_memory_gb: 64,
-        recommended_memory_gb: 64,
+        fits: HardwareFitTable {
+            apple_unified: Some(MemoryRequirement {
+                minimum_gb: 80,
+                comfortable_gb: 96,
+            }),
+            nvidia_vram: Some(MemoryRequirement {
+                minimum_gb: 48,
+                comfortable_gb: 64,
+            }),
+            cpu_only: Some(MemoryRequirement {
+                minimum_gb: 112,
+                comfortable_gb: 128,
+            }),
+        },
         maximum_context_tokens: 131_072,
-        requires_test: true,
+        requires_verification: true,
     },
     LocalModelProfileSpec {
         id: "gpt-oss:120b",
+        aliases: &[],
         label: "GPT-OSS 120B",
-        role: "High-end local reasoning",
+        role: "High-end reasoning and tools",
+        recommendation_role: RecommendationRole::Reasoning,
+        quality_rank: 8,
+        quantization: "MXFP4",
+        capabilities: &["Text", "Reasoning", "Tools", "Structured output"],
+        why_recommended: "High-end reasoning, kept advanced until the exact 32K hardware plan is verified locally.",
         package_size_bytes: 65_000_000_000,
-        minimum_memory_gb: 96,
-        recommended_memory_gb: 96,
+        fits: HardwareFitTable {
+            apple_unified: Some(MemoryRequirement {
+                minimum_gb: 112,
+                comfortable_gb: 128,
+            }),
+            nvidia_vram: Some(MemoryRequirement {
+                minimum_gb: 80,
+                comfortable_gb: 96,
+            }),
+            cpu_only: Some(MemoryRequirement {
+                minimum_gb: 144,
+                comfortable_gb: 160,
+            }),
+        },
         maximum_context_tokens: 131_072,
-        requires_test: true,
+        requires_verification: true,
     },
     LocalModelProfileSpec {
         id: "qwen3:235b",
+        aliases: &[],
         label: "Qwen 3 235B",
-        role: "Workstation / server-scale deployment",
+        role: "Workstation-scale reasoning",
+        recommendation_role: RecommendationRole::Reasoning,
+        quality_rank: 9,
+        quantization: "Q4_K_M",
+        capabilities: &["Text", "Reasoning", "Research"],
+        why_recommended: "Workstation-scale reasoning, advanced until a real 32K test confirms this exact configuration.",
         package_size_bytes: 142_000_000_000,
-        minimum_memory_gb: 192,
-        recommended_memory_gb: 192,
+        fits: HardwareFitTable {
+            apple_unified: Some(MemoryRequirement {
+                minimum_gb: 176,
+                comfortable_gb: 192,
+            }),
+            nvidia_vram: Some(MemoryRequirement {
+                minimum_gb: 160,
+                comfortable_gb: 192,
+            }),
+            cpu_only: Some(MemoryRequirement {
+                minimum_gb: 224,
+                comfortable_gb: 256,
+            }),
+        },
         maximum_context_tokens: 262_144,
-        requires_test: true,
+        requires_verification: true,
     },
 ];
 
+fn normalized_model_id(model: &str) -> &str {
+    model.trim().trim_end_matches(":latest")
+}
+
+fn model_ids_match(left: &str, right: &str) -> bool {
+    normalized_model_id(left) == normalized_model_id(right)
+}
+
+fn quantization_matches(left: &str, right: &str) -> bool {
+    left.trim().eq_ignore_ascii_case(right.trim())
+}
+
 fn local_model_profile_spec(model: &str) -> Option<LocalModelProfileSpec> {
-    LOCAL_MODEL_PROFILE_SPECS
-        .iter()
-        .copied()
-        .find(|profile| profile.id == model.trim())
+    LOCAL_MODEL_PROFILE_SPECS.iter().copied().find(|profile| {
+        model_ids_match(profile.id, model)
+            || profile
+                .aliases
+                .iter()
+                .any(|alias| model_ids_match(alias, model))
+    })
+}
+
+fn requirement_for(
+    profile: LocalModelProfileSpec,
+    hardware: HardwareProfile,
+) -> Option<MemoryRequirement> {
+    match hardware {
+        HardwareProfile::AppleUnified => profile.fits.apple_unified,
+        HardwareProfile::NvidiaVram => profile.fits.nvidia_vram,
+        HardwareProfile::CpuOnly => profile.fits.cpu_only,
+        HardwareProfile::Auto => None,
+    }
 }
 
 fn profile_from_spec(profile: LocalModelProfileSpec) -> LocalModelProfile {
+    let apple_requirement = profile
+        .fits
+        .apple_unified
+        .or(profile.fits.nvidia_vram)
+        .or(profile.fits.cpu_only);
     LocalModelProfile {
         id: profile.id.to_owned(),
         label: profile.label.to_owned(),
         role: profile.role.to_owned(),
+        quantization: profile.quantization.to_owned(),
+        capabilities: profile
+            .capabilities
+            .iter()
+            .map(|capability| (*capability).to_owned())
+            .collect(),
         package_size_bytes: Some(profile.package_size_bytes),
-        minimum_memory_gb: profile.minimum_memory_gb,
-        recommended_memory_gb: profile.recommended_memory_gb,
+        minimum_memory_gb: apple_requirement
+            .map(|fit| fit.minimum_gb)
+            .unwrap_or_default(),
+        recommended_memory_gb: apple_requirement
+            .map(|fit| fit.comfortable_gb)
+            .unwrap_or_default(),
         maximum_context_tokens: Some(profile.maximum_context_tokens),
     }
 }
@@ -602,116 +1082,268 @@ pub fn local_model_profile(model: &str) -> Option<LocalModelProfile> {
     local_model_profile_spec(model).map(profile_from_spec)
 }
 
-/// Assess only the user-selected model. This never replaces the selected
-/// model, changes the context window, or sends anything to a provider.
-pub fn assess_local_model_fit(
+pub fn assess_local_model_fit_for_hardware(
     model: &str,
-    memory_budget_gb: Option<u16>,
+    hardware_profile: HardwareProfile,
+    primary_capacity_gb: Option<u16>,
     context_window_tokens: u32,
+    verified_at_32k: bool,
 ) -> LocalModelFitAssessment {
+    let profile_label = hardware_profile.label();
     let Some(profile) = local_model_profile_spec(model) else {
         return LocalModelFitAssessment {
             fit: LocalModelFit::Unknown,
-            budget_gb: memory_budget_gb,
+            budget_gb: primary_capacity_gb,
             minimum_memory_gb: None,
             recommended_memory_gb: None,
             context_window_tokens,
             maximum_context_tokens: None,
             context_compatible: None,
             requires_test: true,
+            verified_at_32k: false,
+            hardware_profile,
             message: format!(
-                "Kairos has no catalog fit estimate for `{}`. It will keep your selected model and {}K context unchanged.",
+                "Kairos has no catalog fit estimate for `{}` on {profile_label}. It will keep the current model and {}K context unchanged.",
                 model.trim(),
                 context_window_tokens / 1024
             ),
         };
     };
-
-    let context_compatible = context_window_tokens <= profile.maximum_context_tokens;
-    if !context_compatible {
+    let Some(requirement) = requirement_for(profile, hardware_profile) else {
         return LocalModelFitAssessment {
             fit: LocalModelFit::NotRecommended,
-            budget_gb: memory_budget_gb,
-            minimum_memory_gb: Some(profile.minimum_memory_gb),
-            recommended_memory_gb: Some(profile.recommended_memory_gb),
+            budget_gb: primary_capacity_gb,
+            minimum_memory_gb: None,
+            recommended_memory_gb: None,
+            context_window_tokens,
+            maximum_context_tokens: Some(profile.maximum_context_tokens),
+            context_compatible: Some(context_window_tokens <= profile.maximum_context_tokens),
+            requires_test: false,
+            verified_at_32k: false,
+            hardware_profile,
+            message: format!(
+                "Current model is not recommended for {profile_label}: `{}` is not a supported Ollama variant for that hardware profile. Kairos will not switch models automatically.",
+                profile.id
+            ),
+        };
+    };
+    if context_window_tokens > profile.maximum_context_tokens {
+        return LocalModelFitAssessment {
+            fit: LocalModelFit::NotRecommended,
+            budget_gb: primary_capacity_gb,
+            minimum_memory_gb: Some(requirement.minimum_gb),
+            recommended_memory_gb: Some(requirement.comfortable_gb),
             context_window_tokens,
             maximum_context_tokens: Some(profile.maximum_context_tokens),
             context_compatible: Some(false),
             requires_test: false,
+            verified_at_32k: false,
+            hardware_profile,
             message: format!(
-                "{} is catalogued for up to {}K context, below the current {}K request. Kairos will not lower the context or switch models automatically.",
+                "Current model is not recommended for {profile_label} at {}K context: {} is catalogued only through {}K. Kairos will not lower context or switch models automatically.",
+                context_window_tokens / 1024,
                 profile.label,
-                profile.maximum_context_tokens / 1024,
-                context_window_tokens / 1024
+                profile.maximum_context_tokens / 1024
             ),
         };
     }
-
-    let Some(memory_budget_gb) = memory_budget_gb else {
+    let Some(capacity_gb) = primary_capacity_gb else {
         return LocalModelFitAssessment {
             fit: LocalModelFit::Unknown,
             budget_gb: None,
-            minimum_memory_gb: Some(profile.minimum_memory_gb),
-            recommended_memory_gb: Some(profile.recommended_memory_gb),
+            minimum_memory_gb: Some(requirement.minimum_gb),
+            recommended_memory_gb: Some(requirement.comfortable_gb),
             context_window_tokens,
             maximum_context_tokens: Some(profile.maximum_context_tokens),
             context_compatible: Some(true),
-            requires_test: profile.requires_test,
+            requires_test: profile.requires_verification,
+            verified_at_32k: false,
+            hardware_profile,
             message: format!(
-                "Waiting for a memory budget to assess {} at {}K context. Kairos will not change the selected model or context.",
+                "Choose a {profile_label} capacity before Kairos can assess {} for {}K context. The current model and context remain unchanged.",
                 profile.label,
                 context_window_tokens / 1024
             ),
         };
     };
-
-    let (fit, message) = if memory_budget_gb < profile.minimum_memory_gb {
-        (
-            LocalModelFit::NotRecommended,
-            format!(
-                "Not recommended at {memory_budget_gb} GB: Kairos's 32K guidance for {} starts at {} GB. The selected model and context remain unchanged.",
-                profile.label, profile.minimum_memory_gb
-            ),
-        )
-    } else if memory_budget_gb < profile.recommended_memory_gb {
-        (
-            LocalModelFit::Tight,
-            format!(
-                "May work at {memory_budget_gb} GB, but {} GB is recommended for {} at 32K with practical headroom.",
-                profile.recommended_memory_gb, profile.label
-            ),
-        )
-    } else if profile.requires_test {
-        (
-            LocalModelFit::Tight,
-            format!(
-                "Fits the {memory_budget_gb} GB planning tier on paper, but {} needs a local test at {}K before Kairos marks it ready. The selected model and context remain unchanged.",
+    if capacity_gb < requirement.minimum_gb {
+        return LocalModelFitAssessment {
+            fit: LocalModelFit::NotRecommended,
+            budget_gb: Some(capacity_gb),
+            minimum_memory_gb: Some(requirement.minimum_gb),
+            recommended_memory_gb: Some(requirement.comfortable_gb),
+            context_window_tokens,
+            maximum_context_tokens: Some(profile.maximum_context_tokens),
+            context_compatible: Some(true),
+            requires_test: false,
+            verified_at_32k: false,
+            hardware_profile,
+            message: format!(
+                "Current model is not recommended for {profile_label} {capacity_gb} GB at {}K context. {} needs at least {} GB of that primary resource; Kairos will not switch models automatically.",
+                context_window_tokens / 1024,
                 profile.label,
-                context_window_tokens / 1024
+                requirement.minimum_gb
             ),
-        )
-    } else {
-        (
-            LocalModelFit::Recommended,
-            format!(
-                "Recommended for {} at {}K context using Kairos's {memory_budget_gb} GB planning budget.",
-                profile.label,
-                context_window_tokens / 1024
+        };
+    }
+    if capacity_gb < requirement.comfortable_gb {
+        return LocalModelFitAssessment {
+            fit: LocalModelFit::Tight,
+            budget_gb: Some(capacity_gb),
+            minimum_memory_gb: Some(requirement.minimum_gb),
+            recommended_memory_gb: Some(requirement.comfortable_gb),
+            context_window_tokens,
+            maximum_context_tokens: Some(profile.maximum_context_tokens),
+            context_compatible: Some(true),
+            requires_test: true,
+            verified_at_32k: false,
+            hardware_profile,
+            message: format!(
+                "Current model is tight for {profile_label} {capacity_gb} GB at {}K context. {} GB is Kairos's conservative comfortable tier for {}; keep it in Advanced and test explicitly if you want to try it.",
+                context_window_tokens / 1024,
+                requirement.comfortable_gb,
+                profile.label
             ),
-        )
-    };
-
+        };
+    }
+    let requires_test = profile.requires_verification && !verified_at_32k;
     LocalModelFitAssessment {
-        fit,
-        budget_gb: Some(memory_budget_gb),
-        minimum_memory_gb: Some(profile.minimum_memory_gb),
-        recommended_memory_gb: Some(profile.recommended_memory_gb),
+        fit: LocalModelFit::Recommended,
+        budget_gb: Some(capacity_gb),
+        minimum_memory_gb: Some(requirement.minimum_gb),
+        recommended_memory_gb: Some(requirement.comfortable_gb),
         context_window_tokens,
         maximum_context_tokens: Some(profile.maximum_context_tokens),
         context_compatible: Some(true),
-        requires_test: profile.requires_test,
-        message,
+        requires_test,
+        verified_at_32k,
+        hardware_profile,
+        message: if requires_test {
+            format!(
+                "{} fits the {profile_label} {capacity_gb} GB plan at {}K on paper, but stays Advanced until this exact configuration passes a real local 32K test.",
+                profile.label,
+                context_window_tokens / 1024
+            )
+        } else if verified_at_32k {
+            format!(
+                "Verified locally for {profile_label} {capacity_gb} GB at {}K context. Kairos has not changed the selected model or context.",
+                context_window_tokens / 1024
+            )
+        } else {
+            format!(
+                "Recommended for {profile_label} {capacity_gb} GB at {}K context with conservative headroom.",
+                context_window_tokens / 1024
+            )
+        },
     }
+}
+
+/// Legacy callers retain Apple-unified semantics. Native setup uses the
+/// hardware-aware function above so NVIDIA plans never borrow system RAM.
+pub fn assess_local_model_fit(
+    model: &str,
+    memory_budget_gb: Option<u16>,
+    context_window_tokens: u32,
+) -> LocalModelFitAssessment {
+    assess_local_model_fit_for_hardware(
+        model,
+        HardwareProfile::AppleUnified,
+        memory_budget_gb,
+        context_window_tokens,
+        false,
+    )
+}
+
+fn shortlist_quality_floor(capacity_gb: Option<u16>) -> u8 {
+    match capacity_gb.unwrap_or_default() {
+        0..=24 => 1,
+        25..=47 => 2,
+        _ => 3,
+    }
+}
+
+pub fn local_model_recommendations(
+    hardware_profile: HardwareProfile,
+    primary_capacity_gb: Option<u16>,
+    context_window_tokens: u32,
+    setup: &LocalSetupSettings,
+    installed_artifacts: &[LocalModelArtifact],
+) -> Vec<LocalModelRecommendation> {
+    let quality_floor = shortlist_quality_floor(primary_capacity_gb);
+    let mut recommendations = LOCAL_MODEL_PROFILE_SPECS
+        .iter()
+        .copied()
+        .map(|spec| {
+            let artifact = installed_artifacts
+                .iter()
+                .find(|artifact| artifact.resolved_model == spec.id);
+            let verified = setup
+                .matching_verification(
+                    spec.id,
+                    &hardware_profile,
+                    primary_capacity_gb,
+                    context_window_tokens,
+                    artifact,
+                )
+                .is_some();
+            let fit = assess_local_model_fit_for_hardware(
+                spec.id,
+                hardware_profile,
+                primary_capacity_gb,
+                context_window_tokens,
+                verified,
+            );
+            LocalModelRecommendation {
+                profile: profile_from_spec(spec),
+                fit,
+                default_recommended: false,
+                advanced_only: true,
+                why_recommended: spec.why_recommended.to_owned(),
+                recommendation_rank: None,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let ordered_roles = [
+        RecommendationRole::Fast,
+        RecommendationRole::Balanced,
+        RecommendationRole::Reasoning,
+        RecommendationRole::Specialist,
+    ];
+    let mut chosen_ids = Vec::<String>::new();
+    for role in ordered_roles {
+        let candidate = LOCAL_MODEL_PROFILE_SPECS
+            .iter()
+            .copied()
+            .filter(|spec| {
+                spec.recommendation_role == role
+                    && (role == RecommendationRole::Fast || spec.quality_rank >= quality_floor)
+            })
+            .filter(|spec| {
+                recommendations.iter().any(|recommendation| {
+                    recommendation.profile.id == spec.id
+                        && recommendation.fit.fit == LocalModelFit::Recommended
+                        && !recommendation.fit.requires_test
+                })
+            })
+            .max_by_key(|spec| spec.quality_rank);
+        if let Some(candidate) = candidate
+            && !chosen_ids.iter().any(|id| id == candidate.id)
+        {
+            chosen_ids.push(candidate.id.to_owned());
+        }
+    }
+    for (index, model) in chosen_ids.into_iter().take(4).enumerate() {
+        if let Some(recommendation) = recommendations
+            .iter_mut()
+            .find(|recommendation| recommendation.profile.id == model)
+        {
+            recommendation.default_recommended = true;
+            recommendation.advanced_only = false;
+            recommendation.recommendation_rank = Some(index as u8 + 1);
+        }
+    }
+    recommendations
 }
 
 /// Curated selector options for the local alpha. A custom saved model stays
@@ -728,7 +1360,7 @@ pub fn local_model_choices(selected_model: &str) -> Vec<LocalModelChoice> {
     if !selected_model.trim().is_empty()
         && !choices
             .iter()
-            .any(|choice| choice.id == selected_model.trim())
+            .any(|choice| model_ids_match(&choice.id, selected_model))
     {
         choices.push(LocalModelChoice {
             id: selected_model.trim().to_owned(),
@@ -1228,6 +1860,22 @@ mod tests {
         assert_eq!(setup.effective_memory_budget_gb(Some(48)), Some(32));
 
         setup
+            .set_memory_budget(MemoryBudgetMode::Preset, Some(96))
+            .unwrap();
+        assert_eq!(
+            setup.effective_memory_budget_gb(Some(48)),
+            Some(48),
+            "an Auto profile may cap detected hardware but may not inflate it"
+        );
+        setup.set_hardware_profile(HardwareProfile::NvidiaVram);
+        assert_eq!(
+            setup.effective_memory_budget_gb(Some(48)),
+            Some(96),
+            "a manual profile is an explicitly hypothetical planning target"
+        );
+        setup.set_hardware_profile(HardwareProfile::Auto);
+
+        setup
             .set_memory_budget(MemoryBudgetMode::Custom, Some(37))
             .unwrap();
         assert_eq!(
@@ -1262,6 +1910,7 @@ mod tests {
         let legacy_preset = LocalSetupSettings {
             memory_budget_gb: Some(32),
             memory_budget_mode: MemoryBudgetMode::Auto,
+            ..LocalSetupSettings::default()
         };
         assert_eq!(
             legacy_preset.resolved_memory_budget_mode(),
@@ -1272,6 +1921,7 @@ mod tests {
         let legacy_custom = LocalSetupSettings {
             memory_budget_gb: Some(37),
             memory_budget_mode: MemoryBudgetMode::Auto,
+            ..LocalSetupSettings::default()
         };
         assert_eq!(
             legacy_custom.resolved_memory_budget_mode(),
@@ -1281,39 +1931,84 @@ mod tests {
     }
 
     #[test]
-    fn catalog_fit_is_budget_aware_and_never_implies_a_silent_change() {
-        let fast = assess_local_model_fit(FAST_ROUTER_MODEL, Some(16), 32_768);
+    fn catalog_fit_is_hardware_aware_and_never_implies_a_silent_change() {
+        let fast = assess_local_model_fit_for_hardware(
+            FAST_ROUTER_MODEL,
+            HardwareProfile::AppleUnified,
+            Some(16),
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            false,
+        );
         assert_eq!(fast.fit, LocalModelFit::Recommended);
         assert!(!fast.requires_test);
         let fast_json = serde_json::to_value(&fast).unwrap();
         assert_eq!(fast_json["fit"], "recommended");
-        assert_eq!(fast_json["minimumMemoryGb"], 16);
+        assert_eq!(fast_json["minimumMemoryGb"], 12);
         assert_eq!(fast_json["contextWindowTokens"], 32_768);
         assert_eq!(fast_json["requiresTest"], false);
 
-        let default_tight = assess_local_model_fit(DEFAULT_LOCAL_MODEL, Some(32), 32_768);
-        assert_eq!(default_tight.fit, LocalModelFit::Tight);
-        assert!(default_tight.message.contains("48 GB is recommended"));
+        let default_unsupported = assess_local_model_fit_for_hardware(
+            DEFAULT_LOCAL_MODEL,
+            HardwareProfile::AppleUnified,
+            Some(32),
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            false,
+        );
+        assert_eq!(default_unsupported.fit, LocalModelFit::NotRecommended);
+        assert!(default_unsupported.message.contains("Apple Unified 32 GB"));
 
-        let default_ready = assess_local_model_fit(DEFAULT_LOCAL_MODEL, Some(48), 32_768);
+        let default_ready = assess_local_model_fit_for_hardware(
+            DEFAULT_LOCAL_MODEL,
+            HardwareProfile::AppleUnified,
+            Some(48),
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            false,
+        );
         assert_eq!(default_ready.fit, LocalModelFit::Recommended);
 
-        let glm = assess_local_model_fit("glm-4.7-flash", Some(32), 32_768);
-        assert_eq!(glm.fit, LocalModelFit::Tight);
+        let glm = assess_local_model_fit_for_hardware(
+            "glm-4.7-flash",
+            HardwareProfile::AppleUnified,
+            Some(48),
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            false,
+        );
+        assert_eq!(glm.fit, LocalModelFit::Recommended);
         assert!(glm.requires_test);
 
-        let unsupported_context = assess_local_model_fit(FAST_ROUTER_MODEL, Some(16), 65_536);
+        let unsupported_context = assess_local_model_fit_for_hardware(
+            FAST_ROUTER_MODEL,
+            HardwareProfile::AppleUnified,
+            Some(16),
+            65_536,
+            false,
+        );
         assert_eq!(unsupported_context.fit, LocalModelFit::NotRecommended);
         assert_eq!(unsupported_context.context_compatible, Some(false));
         assert!(
             unsupported_context
                 .message
-                .contains("will not lower the context")
+                .contains("will not lower context")
         );
 
-        let custom = assess_local_model_fit("my-model:latest", Some(48), 32_768);
+        let custom = assess_local_model_fit_for_hardware(
+            "my-model:latest",
+            HardwareProfile::AppleUnified,
+            Some(48),
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            false,
+        );
         assert_eq!(custom.fit, LocalModelFit::Unknown);
-        assert!(custom.message.contains("keep your selected model"));
+        assert!(custom.message.contains("keep the current model"));
+
+        let mlx_on_nvidia = assess_local_model_fit_for_hardware(
+            DEFAULT_LOCAL_MODEL,
+            HardwareProfile::NvidiaVram,
+            Some(96),
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            false,
+        );
+        assert_eq!(mlx_on_nvidia.fit, LocalModelFit::NotRecommended);
     }
 
     #[test]
@@ -1321,27 +2016,298 @@ mod tests {
         let profiles = local_model_profiles();
         assert!(profiles.iter().any(|profile| {
             profile.id == "gemma3:12b"
-                && profile.minimum_memory_gb == 24
+                && profile.minimum_memory_gb == 20
                 && profile.recommended_memory_gb == 24
         }));
         assert!(profiles.iter().any(|profile| {
             profile.id == "llama3.3:70b"
-                && profile.minimum_memory_gb == 64
-                && profile.recommended_memory_gb == 64
+                && profile.minimum_memory_gb == 80
+                && profile.recommended_memory_gb == 96
         }));
         assert!(profiles.iter().any(|profile| {
             profile.id == "qwen3:32b"
-                && profile.minimum_memory_gb == 48
+                && profile.minimum_memory_gb == 40
                 && profile.recommended_memory_gb == 48
         }));
         assert!(profiles.iter().any(|profile| {
             profile.id == "qwen3:235b"
-                && profile.minimum_memory_gb == 192
+                && profile.minimum_memory_gb == 176
                 && profile.recommended_memory_gb == 192
         }));
         assert_eq!(
             local_model_profile(DEFAULT_LOCAL_MODEL).and_then(|profile| profile.package_size_bytes),
             Some(22_000_000_000)
+        );
+    }
+
+    #[test]
+    fn conservative_apple_shortlists_cover_each_budget_without_unsafe_models() {
+        let setup = LocalSetupSettings::default();
+        for budget in [16, 24, 32, 48, 64, 96, 192] {
+            let shortlist = local_model_recommendations(
+                HardwareProfile::AppleUnified,
+                Some(budget),
+                DEFAULT_CONTEXT_WINDOW_TOKENS,
+                &setup,
+                &[],
+            );
+            let defaults = shortlist
+                .iter()
+                .filter(|model| model.default_recommended)
+                .collect::<Vec<_>>();
+            assert!(
+                defaults.len() <= 4,
+                "{budget} GB exposed more than four models"
+            );
+            assert!(defaults.iter().all(|model| {
+                model.fit.fit == LocalModelFit::Recommended
+                    && !model.fit.requires_test
+                    && model.fit.context_window_tokens == DEFAULT_CONTEXT_WINDOW_TOKENS
+                    && model.fit.context_compatible == Some(true)
+            }));
+            let ids = defaults
+                .iter()
+                .map(|model| model.profile.id.as_str())
+                .collect::<Vec<_>>();
+            let unique = ids
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(ids.len(), unique.len(), "{budget} GB duplicated a model");
+        }
+
+        let apple_16 = local_model_recommendations(
+            HardwareProfile::AppleUnified,
+            Some(16),
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            &setup,
+            &[],
+        );
+        assert_eq!(
+            apple_16
+                .iter()
+                .filter(|model| model.default_recommended)
+                .map(|model| model.profile.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![FAST_ROUTER_MODEL]
+        );
+
+        let apple_24 = local_model_recommendations(
+            HardwareProfile::AppleUnified,
+            Some(24),
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            &setup,
+            &[],
+        );
+        let apple_24_ids = apple_24
+            .iter()
+            .filter(|model| model.default_recommended)
+            .map(|model| model.profile.id.as_str())
+            .collect::<Vec<_>>();
+        assert!(apple_24_ids.contains(&FAST_ROUTER_MODEL));
+        assert!(apple_24_ids.contains(&"gemma3:12b"));
+        assert!(apple_24_ids.contains(&"qwen3:14b"));
+        assert!(!apple_24_ids.contains(&"gpt-oss:20b"));
+
+        for budget in [32, 48, 64] {
+            let shortlist = local_model_recommendations(
+                HardwareProfile::AppleUnified,
+                Some(budget),
+                DEFAULT_CONTEXT_WINDOW_TOKENS,
+                &setup,
+                &[],
+            );
+            assert!(
+                shortlist.iter().any(|model| {
+                    model.default_recommended && model.profile.id == FAST_ROUTER_MODEL
+                }),
+                "{budget} GB should retain one fast routing role alongside stronger choices"
+            );
+        }
+
+        let apple_48 = local_model_recommendations(
+            HardwareProfile::AppleUnified,
+            Some(48),
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            &setup,
+            &[],
+        );
+        assert!(
+            apple_48.iter().any(|model| {
+                model.default_recommended && model.profile.id == DEFAULT_LOCAL_MODEL
+            })
+        );
+    }
+
+    #[test]
+    fn nvidia_and_cpu_profiles_use_their_own_primary_limits() {
+        let setup = LocalSetupSettings::default();
+        let nvidia_24 = local_model_recommendations(
+            HardwareProfile::NvidiaVram,
+            Some(24),
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            &setup,
+            &[],
+        );
+        assert!(nvidia_24.iter().all(|model| {
+            !model.default_recommended || model.profile.id != DEFAULT_LOCAL_MODEL
+        }));
+        assert!(
+            nvidia_24
+                .iter()
+                .any(|model| { model.default_recommended && model.profile.id == "gpt-oss:20b" })
+        );
+        let cpu_16 = local_model_recommendations(
+            HardwareProfile::CpuOnly,
+            Some(16),
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            &setup,
+            &[],
+        );
+        assert!(cpu_16.iter().all(|model| !model.default_recommended));
+        let cpu_24 = local_model_recommendations(
+            HardwareProfile::CpuOnly,
+            Some(24),
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            &setup,
+            &[],
+        );
+        assert!(
+            cpu_24.iter().any(|model| {
+                model.default_recommended && model.profile.id == FAST_ROUTER_MODEL
+            })
+        );
+    }
+
+    #[test]
+    fn advanced_models_require_matching_real_32k_verification() {
+        let mut setup = LocalSetupSettings::default();
+        let llama_artifact = LocalModelArtifact {
+            resolved_model: "llama3.3:70b".to_owned(),
+            digest: "sha256:llama-q4-test".to_owned(),
+            quantization: "Q4_K_M".to_owned(),
+        };
+        let before = local_model_recommendations(
+            HardwareProfile::AppleUnified,
+            Some(96),
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            &setup,
+            &[],
+        );
+        assert!(before.iter().any(|model| {
+            model.profile.id == "llama3.3:70b" && model.advanced_only && model.fit.requires_test
+        }));
+        setup.record_verification(LocalModelVerification {
+            model: "llama3.3:70b".to_owned(),
+            resolved_model: "llama3.3:70b".to_owned(),
+            digest: llama_artifact.digest.clone(),
+            quantization: "Q4_K_M".to_owned(),
+            hardware_profile: HardwareProfile::AppleUnified,
+            effective_capacity_gb: 96,
+            context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+            verified_at_unix_seconds: 1,
+        });
+        let after = local_model_recommendations(
+            HardwareProfile::AppleUnified,
+            Some(96),
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            &setup,
+            &[llama_artifact.clone()],
+        );
+        assert!(after.iter().any(|model| {
+            model.profile.id == "llama3.3:70b"
+                && model.default_recommended
+                && model.fit.verified_at_32k
+        }));
+
+        let wrong_context = local_model_recommendations(
+            HardwareProfile::AppleUnified,
+            Some(96),
+            65_536,
+            &setup,
+            &[llama_artifact.clone()],
+        );
+        assert!(
+            wrong_context
+                .iter()
+                .any(|model| { model.profile.id == "llama3.3:70b" && model.advanced_only })
+        );
+        let wrong_hardware = local_model_recommendations(
+            HardwareProfile::NvidiaVram,
+            Some(96),
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            &setup,
+            &[llama_artifact.clone()],
+        );
+        assert!(
+            wrong_hardware
+                .iter()
+                .any(|model| { model.profile.id == "llama3.3:70b" && model.advanced_only })
+        );
+
+        let mut wrong_quantization_setup = LocalSetupSettings::default();
+        wrong_quantization_setup.record_verification(LocalModelVerification {
+            model: "llama3.3:70b".to_owned(),
+            resolved_model: "llama3.3:70b".to_owned(),
+            digest: llama_artifact.digest.clone(),
+            quantization: "Q8_0".to_owned(),
+            hardware_profile: HardwareProfile::AppleUnified,
+            effective_capacity_gb: 96,
+            context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+            verified_at_unix_seconds: 2,
+        });
+        let wrong_quantization = local_model_recommendations(
+            HardwareProfile::AppleUnified,
+            Some(96),
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            &wrong_quantization_setup,
+            &[llama_artifact.clone()],
+        );
+        assert!(wrong_quantization.iter().any(|model| {
+            model.profile.id == "llama3.3:70b" && model.advanced_only && model.fit.requires_test
+        }));
+
+        let changed_artifact = LocalModelArtifact {
+            digest: "sha256:llama-q4-new-pull".to_owned(),
+            ..llama_artifact.clone()
+        };
+        let changed_pull = local_model_recommendations(
+            HardwareProfile::AppleUnified,
+            Some(96),
+            DEFAULT_CONTEXT_WINDOW_TOKENS,
+            &setup,
+            &[changed_artifact],
+        );
+        assert!(changed_pull.iter().any(|model| {
+            model.profile.id == "llama3.3:70b" && model.advanced_only && model.fit.requires_test
+        }));
+
+        let mut legacy_alias_setup = LocalSetupSettings::default();
+        legacy_alias_setup.record_verification(LocalModelVerification {
+            model: "glm-4.7-flash".to_owned(),
+            resolved_model: "glm-4.7-flash".to_owned(),
+            digest: "sha256:legacy".to_owned(),
+            quantization: "Q4_K_M".to_owned(),
+            hardware_profile: HardwareProfile::AppleUnified,
+            effective_capacity_gb: 48,
+            context_window_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+            verified_at_unix_seconds: 3,
+        });
+        let latest_artifact = LocalModelArtifact {
+            resolved_model: "glm-4.7-flash:latest".to_owned(),
+            digest: "sha256:legacy".to_owned(),
+            quantization: "Q4_K_M".to_owned(),
+        };
+        assert!(
+            legacy_alias_setup
+                .matching_verification(
+                    "glm-4.7-flash:latest",
+                    &HardwareProfile::AppleUnified,
+                    Some(48),
+                    DEFAULT_CONTEXT_WINDOW_TOKENS,
+                    Some(&latest_artifact),
+                )
+                .is_none()
         );
     }
 

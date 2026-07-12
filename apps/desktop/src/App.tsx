@@ -19,6 +19,10 @@ import routeIdle from "../../../design/assets/routing/idle.svg";
 import routeMulti from "../../../design/assets/routing/routed-multi.svg";
 import routeOne from "../../../design/assets/routing/routed-one.svg";
 
+type HardwareProfile = "auto" | "apple_unified" | "nvidia_vram" | "cpu_only";
+
+type OllamaModelChoice = { id: string; label: string; role: string };
+
 type AppStatus = {
   configPath: string;
   initialized: boolean;
@@ -31,7 +35,7 @@ type AppStatus = {
     selectedModelInstalled: boolean;
     installedModels: string[];
     setupMessage?: string;
-    choices: Array<{ id: string; label: string; role: string }>;
+    choices: OllamaModelChoice[];
     selectedModelFit?: ModelFit;
   };
   app?: {
@@ -104,6 +108,13 @@ type LocalSetupModel = {
   memoryBand?: string;
   recommendedContext?: string;
   fit?: ModelFit;
+  capabilities?: string[];
+  variant?: string;
+  whyRecommended?: string;
+  recommendationRank?: number;
+  defaultRecommended?: boolean;
+  advancedOnly?: boolean;
+  verifiedAt32k?: boolean;
 };
 
 type OllamaInstallAction = {
@@ -118,6 +129,13 @@ type LocalSetupStatus = {
   running?: boolean;
   endpoint?: string;
   detectedMemoryGb?: number;
+  detectedHardwareProfile?: HardwareProfile;
+  selectedHardwareProfile?: HardwareProfile;
+  effectiveHardwareProfile?: HardwareProfile;
+  hardwareProfileLabel?: string;
+  primaryFitLimitGb?: number | null;
+  primaryFitLimitLabel?: string;
+  hardwarePlanningOverride?: boolean;
   availableDiskGb?: number;
   selectedModelInstalled?: boolean;
   setupMessage?: string;
@@ -130,6 +148,8 @@ type LocalSetupStatus = {
   selectedModelFit?: ModelFit;
   ollamaInstallAction?: OllamaInstallAction;
   models?: LocalSetupModel[];
+  recommendedModels?: LocalSetupModel[];
+  advancedModels?: LocalSetupModel[];
 };
 
 type OllamaPullProgress = {
@@ -271,6 +291,13 @@ const browserPreviewSetup: LocalSetupStatus = {
   running: true,
   endpoint: "http://localhost:11434",
   detectedMemoryGb: 48,
+  detectedHardwareProfile: "apple_unified",
+  selectedHardwareProfile: "auto",
+  effectiveHardwareProfile: "apple_unified",
+  hardwareProfileLabel: "Apple Silicon · auto-detected",
+  primaryFitLimitGb: 48,
+  primaryFitLimitLabel: "Apple unified memory",
+  hardwarePlanningOverride: false,
   availableDiskGb: 532,
   selectedModelInstalled: true,
   contextWindowTokens: 32_768,
@@ -373,14 +400,21 @@ const modelKnownWarnings: Record<string, string> = {
   "glm-4.7-flash": "Requires Ollama 0.14.3 pre-release or newer before download/test.",
 };
 
+function normalizedModelId(model: string) {
+  return model.trim().replace(/:latest$/, "");
+}
+
+function sameModelId(left: string, right: string) {
+  return normalizedModelId(left) === normalizedModelId(right);
+}
+
 function isInstalledModel(model: string, installedModels: string[]) {
-  const base = model.trim().replace(/:latest$/, "");
-  return installedModels.some((installed) => installed === model || installed === base || installed === `${base}:latest`);
+  return installedModels.some((installed) => sameModelId(installed, model));
 }
 
 function modelFitLabel(fit?: ModelFit) {
   switch (fit?.fit) {
-    case "recommended": return "Recommended";
+    case "recommended": return fit.requiresTest ? "Test required" : "Recommended";
     case "tight": return fit.requiresTest ? "Test required" : "Tight fit";
     case "not_recommended": return "Not recommended";
     default: return "No fit estimate";
@@ -389,7 +423,7 @@ function modelFitLabel(fit?: ModelFit) {
 
 function modelFitTone(fit?: ModelFit): "success" | "warning" | "danger" | "neutral" {
   switch (fit?.fit) {
-    case "recommended": return "success";
+    case "recommended": return fit.requiresTest ? "warning" : "success";
     case "tight": return "warning";
     case "not_recommended": return "danger";
     default: return "neutral";
@@ -841,6 +875,8 @@ export default function App() {
   const [providerApiKey, setProviderApiKey] = useState("");
   const [providerSettingsBusy, setProviderSettingsBusy] = useState(false);
   const [providerSettingsFeedback, setProviderSettingsFeedback] = useState<string | null>(null);
+  const [hardwareProfile, setHardwareProfile] = useState<HardwareProfile>("auto");
+  const [hardwareProfileBusy, setHardwareProfileBusy] = useState(false);
   const [memoryBudget, setMemoryBudget] = useState<MemoryBudget>("auto");
   const [customMemoryBudget, setCustomMemoryBudget] = useState("48");
   const [memoryBudgetBusy, setMemoryBudgetBusy] = useState(false);
@@ -848,6 +884,7 @@ export default function App() {
   const [pullProgress, setPullProgress] = useState<OllamaPullProgress | null>(null);
   const [failedPullModel, setFailedPullModel] = useState<string | null>(null);
   const [setupFeedback, setSetupFeedback] = useState<string | null>(null);
+  const [showAllModels, setShowAllModels] = useState(false);
   const [brains, setBrains] = useState<BrainRecord[]>(initialBrains);
   const [policyEditor, setPolicyEditor] = useState<BrainPolicyDraft | null>(null);
   const [policyBusy, setPolicyBusy] = useState(false);
@@ -891,8 +928,15 @@ export default function App() {
   const ollamaInstalled = localSetup?.ollamaInstalled ?? ollamaRunning;
   const selectedModelInstalled = localSetup?.selectedModelInstalled ?? status?.model.selectedModelInstalled ?? false;
   const detectedMemoryGb = localSetup?.detectedMemoryGb ?? (nativeRuntime ? 0 : 48);
+  const effectiveHardwareProfile = localSetup?.effectiveHardwareProfile ?? localSetup?.detectedHardwareProfile ?? "apple_unified";
+  const hardwareProfileLabel = localSetup?.hardwareProfileLabel
+    ?? (effectiveHardwareProfile === "nvidia_vram" ? "NVIDIA GPU" : effectiveHardwareProfile === "cpu_only" ? "CPU-only" : "Apple Silicon");
+  const primaryFitLimitGb = localSetup?.primaryFitLimitGb ?? detectedMemoryGb;
+  const primaryFitLimitLabel = localSetup?.primaryFitLimitLabel
+    ?? (effectiveHardwareProfile === "nvidia_vram" ? "NVIDIA VRAM" : effectiveHardwareProfile === "cpu_only" ? "System memory" : "Apple unified memory");
+  const hardwarePlanningOverride = localSetup?.hardwarePlanningOverride ?? hardwareProfile !== "auto";
   const availableDiskGb = localSetup?.availableDiskGb ?? (nativeRuntime ? 0 : 532);
-  const customMemoryBudgetValue = Math.max(1, Math.min(192, Number(customMemoryBudget) || detectedMemoryGb || 1));
+  const customMemoryBudgetValue = Math.max(1, Math.min(192, Number(customMemoryBudget) || primaryFitLimitGb || detectedMemoryGb || 1));
   const effectiveMemoryBudget = memoryBudget === "auto"
     ? (localSetup?.effectiveMemoryBudgetGb ?? (detectedMemoryGb || 48))
     : memoryBudget === "custom"
@@ -909,33 +953,107 @@ export default function App() {
   const selectedBrain = brains.find((brain) => brain.id === brainOverride);
   const writableBrains = brains.filter(canConfirmWrites);
   const graphNode = graph.nodes.find((node) => node.id === selectedGraphNode);
-  const modelCards = useMemo(() => {
-    const setupModels: LocalSetupModel[] = localSetup?.models?.length
-      ? localSetup.models
+  const catalogModels = useMemo(() => {
+    const responseModels = [
+      ...(localSetup?.advancedModels ?? []),
+      ...(localSetup?.models ?? []),
+      ...(localSetup?.recommendedModels ?? []),
+    ];
+    const sourceModels: LocalSetupModel[] = responseModels.length
+      ? responseModels
       : (status?.model.choices ?? []).map((choice) => ({
         id: choice.id,
         label: choice.label,
+        role: choice.role,
         installed: isInstalledModel(choice.id, status?.model.installedModels ?? []),
         downloadSize: modelCatalog[choice.id]?.downloadSize,
-        memoryBand: modelCatalog[choice.id]?.memoryBand,
         recommendedContext: modelCatalog[choice.id]?.context,
+        capabilities: [],
       }));
-    const selectedModel = status?.model.selectedModel;
-    return [...setupModels].sort((left, right) => {
-      const selectedDifference = Number(right.id === selectedModel) - Number(left.id === selectedModel);
-      if (selectedDifference) return selectedDifference;
-      const fitDifference = modelFitRank(left.fit) - modelFitRank(right.fit);
-      if (fitDifference) return fitDifference;
-      return (left.label ?? left.id).localeCompare(right.label ?? right.id);
+    const modelsById = new Map<string, LocalSetupModel>();
+    sourceModels.forEach((model) => {
+      const key = normalizedModelId(model.id);
+      const existing = modelsById.get(key);
+      modelsById.set(key, existing ? { ...existing, ...model } : model);
     });
-  }, [localSetup?.models, status?.model.choices, status?.model.installedModels, status?.model.selectedModel]);
-  const installedOllamaChoices = useMemo(
-    () => (status?.model.choices ?? []).filter((choice) => isInstalledModel(choice.id, status?.model.installedModels ?? [])),
-    [status?.model.choices, status?.model.installedModels],
-  );
-  const selectedComposerModel = installedOllamaChoices.some((choice) => choice.id === status?.model.selectedModel)
-    ? status?.model.selectedModel ?? ""
-    : "";
+    return [...modelsById.values()];
+  }, [localSetup?.advancedModels, localSetup?.models, localSetup?.recommendedModels, status?.model.choices, status?.model.installedModels]);
+  const recommendedModelCards = useMemo(() => {
+    const hasRecommendationResponse = localSetup?.recommendedModels !== undefined;
+    const responseModels = localSetup?.recommendedModels ?? catalogModels;
+    const selectedModel = status?.model.selectedModel ?? "";
+    const seen = new Set<string>();
+    return responseModels
+      .filter((model) => hasRecommendationResponse
+        ? model.defaultRecommended === true && model.advancedOnly !== true && model.fit?.fit === "recommended"
+        : model.advancedOnly !== true && model.fit?.fit === "recommended" && !model.fit.requiresTest)
+      .sort((left, right) => (left.recommendationRank ?? Number.MAX_SAFE_INTEGER) - (right.recommendationRank ?? Number.MAX_SAFE_INTEGER))
+      .filter((model) => {
+        const key = normalizedModelId(model.id);
+        if (seen.has(key) || sameModelId(model.id, selectedModel)) return false;
+        seen.add(key);
+        return true;
+      })
+      .slice(0, 4);
+  }, [catalogModels, localSetup?.recommendedModels, status?.model.selectedModel]);
+  const selectedModelCard = useMemo<LocalSetupModel | null>(() => {
+    const selectedModel = status?.model.selectedModel;
+    if (!selectedModel) return null;
+    const matchedModel = catalogModels.find((model) => sameModelId(model.id, selectedModel));
+    return {
+      id: selectedModel,
+      label: matchedModel?.label ?? selectedModel,
+      role: matchedModel?.role,
+      installed: selectedModelInstalled,
+      downloadSize: matchedModel?.downloadSize,
+      recommendedContext: matchedModel?.recommendedContext,
+      fit: selectedModelFit ?? matchedModel?.fit,
+      capabilities: matchedModel?.capabilities ?? [],
+      variant: matchedModel?.variant,
+      whyRecommended: matchedModel?.whyRecommended,
+      verifiedAt32k: matchedModel?.verifiedAt32k,
+    };
+  }, [catalogModels, selectedModelFit, selectedModelInstalled, status?.model.selectedModel]);
+  const advancedModelCards = useMemo(() => {
+    const recommendedIds = new Set(recommendedModelCards.map((model) => normalizedModelId(model.id)));
+    const selectedModel = status?.model.selectedModel ?? "";
+    const responseModels = localSetup?.advancedModels ?? catalogModels;
+    const seen = new Set<string>();
+    return responseModels
+      .filter((model) => {
+        const key = normalizedModelId(model.id);
+        if (seen.has(key) || recommendedIds.has(key) || sameModelId(model.id, selectedModel)) return false;
+        seen.add(key);
+        return true;
+      })
+      .sort((left, right) => {
+        const fitDifference = modelFitRank(left.fit) - modelFitRank(right.fit);
+        if (fitDifference) return fitDifference;
+        return (left.label ?? left.id).localeCompare(right.label ?? right.id);
+      });
+  }, [catalogModels, localSetup?.advancedModels, recommendedModelCards, status?.model.selectedModel]);
+  const installedOllamaChoices = useMemo(() => {
+    const choices = status?.model.choices ?? [];
+    const installedModels = status?.model.installedModels ?? [];
+    const uniqueChoices = new Map<string, OllamaModelChoice>();
+    installedModels.forEach((installedModel) => {
+      const matchingChoice = choices.find((choice) => sameModelId(choice.id, installedModel));
+      const id = matchingChoice?.id ?? installedModel;
+      const key = normalizedModelId(id);
+      if (!uniqueChoices.has(key)) {
+        uniqueChoices.set(key, {
+          id,
+          label: matchingChoice?.label ?? installedModel,
+          role: matchingChoice?.role ?? "Installed Ollama model",
+        });
+      }
+    });
+    return [...uniqueChoices.values()].sort((left, right) => {
+      const selectedDifference = Number(sameModelId(right.id, status?.model.selectedModel ?? "")) - Number(sameModelId(left.id, status?.model.selectedModel ?? ""));
+      return selectedDifference || left.label.localeCompare(right.label);
+    });
+  }, [status?.model.choices, status?.model.installedModels, status?.model.selectedModel]);
+  const selectedInstalledOllamaModel = installedOllamaChoices.find((choice) => sameModelId(choice.id, status?.model.selectedModel ?? ""))?.id ?? "";
 
   const routeIcon = error ? routeError : briefResult
     ? briefResult.context.route.brains.length > 1 ? routeMulti : routeOne
@@ -1039,6 +1157,12 @@ export default function App() {
       setMemoryBudget(localSetup.memoryBudgetGb as MemoryBudget);
     }
   }, [localSetup?.memoryBudgetMode, localSetup?.memoryBudgetGb]);
+
+  useEffect(() => {
+    if (localSetup?.selectedHardwareProfile) {
+      setHardwareProfile(localSetup.selectedHardwareProfile);
+    }
+  }, [localSetup?.selectedHardwareProfile]);
 
   useEffect(() => {
     if (!nativeRuntime) return;
@@ -1413,12 +1537,13 @@ export default function App() {
     setSetupFeedback(null);
     const result = await callFeature<unknown>(
       "test_ollama_model",
-      { model },
+      { model, contextWindowTokens: 32_768 },
       "The model test is not available in this native build yet.",
     );
     const raw = asRecord(result);
     if (result) {
-      setSetupFeedback(typeof raw?.message === "string" ? raw.message : `${model} passed a local availability check.`);
+      setSetupFeedback(typeof raw?.message === "string" ? raw.message : `${model} passed a real local 32K-context test.`);
+      await refreshStatus();
     }
     setModelOperation(null);
   };
@@ -1434,6 +1559,26 @@ export default function App() {
       window.open(ollamaInstallUrl, "_blank", "noopener,noreferrer");
       setCapabilityNotice("Opened the official Ollama download page in your browser.");
     }
+  };
+
+  const applyHardwareProfile = async (nextHardwareProfile: HardwareProfile) => {
+    setHardwareProfile(nextHardwareProfile);
+    setHardwareProfileBusy(true);
+    setSetupFeedback(null);
+    const result = await callFeature<LocalSetupStatus>(
+      "set_hardware_profile",
+      { hardwareProfile: nextHardwareProfile },
+      "Kairos could not save this hardware planning profile. Your selected model and context were not changed.",
+    );
+    if (result) {
+      setLocalSetup(result);
+      setShowAllModels(false);
+      setSetupFeedback("Hardware planning profile saved. Your selected model, memory budget, and 32K target remain unchanged.");
+      await refreshStatus();
+    } else if (nativeRuntime) {
+      setHardwareProfile(localSetup?.selectedHardwareProfile ?? "auto");
+    }
+    setHardwareProfileBusy(false);
   };
 
   const applyMemoryBudget = async (nextBudget: MemoryBudget) => {
@@ -1457,6 +1602,7 @@ export default function App() {
     );
     if (result) {
       setLocalSetup(result);
+      setShowAllModels(false);
       setSetupFeedback(`Memory plan saved: ${memoryBudgetMode === "auto" ? "Auto" : `${memoryBudgetGb} GB`}. Your model and 32K target remain unchanged.`);
       await refreshStatus();
     }
@@ -1655,6 +1801,48 @@ export default function App() {
       : !selectedModelInstalled
         ? { title: "Download the selected model", detail: status?.model.setupMessage ?? "The selected model is not installed yet.", tone: "warning" as const }
         : { title: "Local AI is ready", detail: `${activeModel} · ${status?.model.contextWindowTokens ? status.model.contextWindowTokens / 1024 : 32}K context · local only`, tone: "success" as const };
+  const planningBusy = memoryBudgetBusy || hardwareProfileBusy;
+  const currentModelFit = selectedModelCard?.fit ?? selectedModelFit;
+  const scrollToRecommendations = () => {
+    document.getElementById("recommended-models")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+  const renderModelCard = (setupModel: LocalSetupModel, kind: "recommended" | "advanced") => {
+    const id = setupModel.id;
+    const fallback = modelCatalog[id];
+    const installed = setupModel.installed ?? isInstalledModel(id, status?.model.installedModels ?? []);
+    const selected = sameModelId(status?.model.selectedModel ?? "", id);
+    const working = modelOperation !== null && sameModelId(modelOperation.model, id);
+    const pulling = modelOperation?.kind === "pull" && sameModelId(modelOperation.model, id);
+    const progress = pulling && pullProgress && sameModelId(pullProgress.model, id) ? pullProgress : null;
+    const fit = setupModel.fit;
+    const knownWarning = modelKnownWarnings[normalizedModelId(id)];
+    const displayName = setupModel.label ?? fallback?.label;
+    const capabilities = setupModel.capabilities ?? [];
+    return (
+      <article className={`model-card model-card--${kind} ${selected ? "is-selected" : ""} model-card--${fit?.fit ?? "unknown"}`} key={id}>
+        <div>
+          <p className="section-label">{setupModel.role ?? (kind === "recommended" ? "Recommended local model" : "Advanced catalog")}</p>
+          <h3><code className="model-card__tag">{id}</code></h3>
+          {displayName && displayName !== id && <p className="model-card__name">{displayName}{setupModel.variant ? ` · ${setupModel.variant}` : ""}</p>}
+          <p>{fit?.message ?? "Fit estimate becomes available after the local setup check."}</p>
+        </div>
+        <dl>
+          <div><dt>Download</dt><dd>{setupModel.downloadSize ?? fallback?.downloadSize ?? "Reported by Ollama during download"}</dd></div>
+          <div><dt>Context</dt><dd>32K target</dd></div>
+        </dl>
+        {capabilities.length > 0 && <div className="model-capability-list" aria-label="Model capabilities">{capabilities.map((capability) => <span key={capability}>{capability}</span>)}</div>}
+        {setupModel.whyRecommended && <p className="model-card__why">{setupModel.whyRecommended}</p>}
+        {knownWarning && <small className="model-card__warning">{knownWarning}</small>}
+        <div className="model-card__actions">
+          {fit && <StatusPill tone={modelFitTone(fit)}>{modelFitLabel(fit).toUpperCase()}</StatusPill>}
+          {installed ? <StatusPill tone="success">INSTALLED</StatusPill> : pulling ? <div className="model-pull-progress"><progress max="100" value={progress?.percent} /><span>{progress?.percent !== undefined ? `${Math.round(progress.percent)}% · ${progress.status}` : progress?.status ?? "Starting download…"}</span><button className="secondary-action" type="button" onClick={() => void cancelPullModel(id)}>Cancel</button></div> : <button className="secondary-action" type="button" onClick={() => void handlePullModel(id)} disabled={Boolean(modelOperation) || planningBusy} title="Downloads this model only; it will not change your active model">{failedPullModel && sameModelId(failedPullModel, id) ? "Retry download" : "Download"}</button>}
+          {installed && <button className="text-action" type="button" onClick={() => void handleTestModel(id)} disabled={Boolean(modelOperation) || planningBusy}>{working && modelOperation?.kind === "test" ? "Testing…" : "Test at 32K"}</button>}
+          {installed && !selected && <button className="text-action" type="button" onClick={() => void selectModel(id)} disabled={busy || planningBusy}>Use this model</button>}
+          {setupModel.verifiedAt32k && <StatusPill tone="success">VERIFIED 32K</StatusPill>}
+        </div>
+      </article>
+    );
+  };
 
   return (
     <main className={`app-shell ${expanded ? "is-expanded" : "is-compact"}`}>
@@ -1866,14 +2054,14 @@ export default function App() {
                   <label className="composer-select composer-select--model">
                     <span className="sr-only">Ollama model</span>
                     <select
-                      value={selectedComposerModel}
+                      value={selectedInstalledOllamaModel}
                       onChange={(event) => void selectModel(event.target.value)}
                       disabled={!status || busy || Boolean(chatPreview) || !nativeRuntime || installedOllamaChoices.length === 0}
                       aria-label="Ollama model"
                     >
                       {!status && <option value="">Checking local models…</option>}
                       {status && installedOllamaChoices.length === 0 && <option value="">No installed local model</option>}
-                      {status && !selectedComposerModel && installedOllamaChoices.length > 0 && <option value="">Select an installed model…</option>}
+                      {status && !selectedInstalledOllamaModel && installedOllamaChoices.length > 0 && <option value="" disabled>Current model is not installed</option>}
                       {installedOllamaChoices.map((choice) => <option key={choice.id} value={choice.id}>{choice.label}</option>)}
                     </select>
                   </label>
@@ -2077,66 +2265,62 @@ export default function App() {
                 <StatusPill tone={setupState.tone}>{ollamaRunning ? "OLLAMA" : "SETUP"}</StatusPill>
               </div>
               <div className="hardware-grid">
-                <div><span>Detected unified memory</span><strong>{detectedMemoryGb ? `${detectedMemoryGb} GB` : "Detecting…"}</strong><small>Auto-detected; not manually claimed.</small></div>
-                <div><span>Free disk</span><strong>{availableDiskGb ? `${availableDiskGb} GB` : "Detecting…"}</strong><small>Model packages are stored by Ollama.</small></div>
-                <div><span>Context target</span><strong>32K</strong><small>More context also uses more memory.</small></div>
+                <div><span>{primaryFitLimitLabel}</span><strong>{primaryFitLimitGb ? `${primaryFitLimitGb} GB` : "Detecting…"}</strong><small>{hardwareProfileLabel}{hardwarePlanningOverride ? " · Manual planning override." : " · Auto-detected."}</small></div>
+                <div><span>Free disk</span><strong>{availableDiskGb ? `${availableDiskGb} GB` : "Detecting…"}</strong><small>Download packages are stored by Ollama.</small></div>
+                <div><span>Recommendation context</span><strong>32K</strong><small>Fit and tests stay at 32K; Kairos never lowers it silently.</small></div>
               </div>
               <div className="memory-setup-row">
                 <div className="memory-controls">
-                  <label><span>Memory budget</span><select value={String(memoryBudget)} disabled={memoryBudgetBusy} onChange={(event) => {
+                  <label className="hardware-profile-control"><span>Hardware profile</span><select value={hardwareProfile} disabled={planningBusy} onChange={(event) => void applyHardwareProfile(event.target.value as HardwareProfile)}>
+                    <option value="auto">Auto ({hardwareProfileLabel})</option>
+                    <optgroup label="Manual planning override">
+                      <option value="apple_unified">Apple unified memory</option>
+                      <option value="nvidia_vram">NVIDIA VRAM</option>
+                      <option value="cpu_only">CPU-only</option>
+                    </optgroup>
+                  </select></label>
+                  <label className="memory-budget-control"><span>Memory budget</span><select value={String(memoryBudget)} disabled={planningBusy} onChange={(event) => {
                     const nextBudget = (event.target.value === "auto" || event.target.value === "custom" ? event.target.value : Number(event.target.value)) as MemoryBudget;
                     setMemoryBudget(nextBudget);
                     if (nextBudget !== "custom") void applyMemoryBudget(nextBudget);
                   }}>
-                    <option value="auto">{detectedMemoryGb ? `Auto (${detectedMemoryGb} GB detected)` : "Auto (detect hardware)"}</option>
+                    <option value="auto">{primaryFitLimitGb ? `Auto (${primaryFitLimitGb} GB fit limit)` : "Auto (detect hardware)"}</option>
                     {[16, 24, 32, 48, 64, 96, 192].map((amount) => <option key={amount} value={amount}>{amount} GB</option>)}
                     <option value="custom">Custom</option>
                   </select></label>
-                  {memoryBudget === "custom" && <label><span>Custom budget (GB)</span><input type="number" min="1" max="192" value={customMemoryBudget} disabled={memoryBudgetBusy} onChange={(event) => setCustomMemoryBudget(event.target.value)} /></label>}
+                  {memoryBudget === "custom" && <label className="custom-memory-budget-control"><span>Custom budget (GB)</span><input type="number" min="1" max="192" value={customMemoryBudget} disabled={planningBusy} onChange={(event) => setCustomMemoryBudget(event.target.value)} /></label>}
                   <div className="memory-budget-copy">
-                    <strong>{effectiveMemoryBudget} GB planning budget</strong>
-                    <p>{localSetup?.memoryBudgetMessage ?? "Changing this budget re-ranks model guidance only. Kairos does not change your model or context automatically."}</p>
-                    {memoryBudgetPending && <span className="memory-plan-pending">Pending apply — the catalog below still reflects your saved budget.</span>}
-                    {memoryBudget === "custom" && <button className="text-action" onClick={() => void applyMemoryBudget("custom")} disabled={memoryBudgetBusy}>Apply custom budget</button>}
+                    <strong>{effectiveMemoryBudget} GB preference cap</strong>
+                    <p>{localSetup?.memoryBudgetMessage ?? "This is a planning preference, not a claim about installed hardware. Changing it re-ranks guidance only; Kairos does not change your model or context automatically."}</p>
+                    <p>Fit uses {primaryFitLimitLabel.toLowerCase()}{primaryFitLimitGb ? ` (${primaryFitLimitGb} GB)` : ""} for one 32K conversation.</p>
+                    {memoryBudgetPending && <span className="memory-plan-pending">Pending apply — the shortlist below still reflects your saved budget.</span>}
+                    {memoryBudget === "custom" && <button className="text-action" type="button" onClick={() => void applyMemoryBudget("custom")} disabled={planningBusy}>Apply custom budget</button>}
                   </div>
                 </div>
                 <aside className={`ollama-health ${ollamaRunning ? "is-running" : "is-warning"}`} aria-label="Ollama setup health">
                   <div className="ollama-health__heading"><div><p className="section-label">Ollama</p><h3>{!ollamaInstalled ? "Not installed" : ollamaRunning ? "Running locally" : "Installed, not running"}</h3></div><StatusPill tone={ollamaRunning ? "success" : "warning"}>{ollamaRunning ? "READY" : "SETUP"}</StatusPill></div>
                   <p>{ollamaRunning ? `${localSetup?.endpoint ?? "http://localhost:11434"} · ${status?.model.installedModels.length ?? 0} installed model${(status?.model.installedModels.length ?? 0) === 1 ? "" : "s"}` : localSetup?.setupMessage ?? "Check the local Ollama service before using a local model."}</p>
-                  {!ollamaInstalled ? <button className="primary-action" onClick={() => void openOllamaInstall()}>{localSetup?.ollamaInstallAction?.label ?? "Install Ollama"}</button> : <button className="secondary-action" onClick={() => void refreshStatus()}>Refresh status</button>}
+                  {!ollamaInstalled ? <button className="primary-action" type="button" onClick={() => void openOllamaInstall()}>{localSetup?.ollamaInstallAction?.label ?? "Install Ollama"}</button> : <button className="secondary-action" type="button" onClick={() => void refreshStatus()}>Refresh status</button>}
                 </aside>
               </div>
-              {selectedModelFit && (
-                <aside className={`memory-fit memory-fit--${selectedModelFit.fit}`}>
-                  <div><StatusPill tone={modelFitTone(selectedModelFit)}>{modelFitLabel(selectedModelFit).toUpperCase()}</StatusPill><strong>{status?.model.selectedModel ?? "Selected model"} · {selectedModelFit.contextWindowTokens ? `${Math.round(selectedModelFit.contextWindowTokens / 1024)}K` : "32K"}</strong></div>
-                  <p>{selectedModelFit.message}</p>
+              {selectedModelCard && (
+                <aside className={`memory-fit current-model-fit memory-fit--${currentModelFit?.fit ?? "unknown"}`}>
+                  <div><StatusPill tone={modelFitTone(currentModelFit)}>{modelFitLabel(currentModelFit).toUpperCase()}</StatusPill><strong>Current model · <code>{selectedModelCard.id}</code> · 32K</strong></div>
+                  {currentModelFit?.fit === "not_recommended" ? <p><strong>Current model is not recommended for {primaryFitLimitLabel} {primaryFitLimitGb ? `${primaryFitLimitGb} GB` : "at the detected limit"} at 32K context.</strong> {currentModelFit.message}</p> : <p>{currentModelFit?.message ?? "Kairos keeps your current model visible and will never switch it automatically."}</p>}
+                  <div className="current-model-fit__actions">
+                    <button className="secondary-action" type="button" onClick={scrollToRecommendations} disabled={recommendedModelCards.length === 0}>Choose a recommended model</button>
+                    {selectedModelCard.installed ? <button className="text-action" type="button" onClick={() => void handleTestModel(selectedModelCard.id)} disabled={Boolean(modelOperation) || planningBusy}>{modelOperation?.kind === "test" && sameModelId(modelOperation.model, selectedModelCard.id) ? "Testing…" : "Test current at 32K"}</button> : <><button className="text-action" type="button" onClick={() => void handlePullModel(selectedModelCard.id)} disabled={Boolean(modelOperation) || planningBusy}>{modelOperation?.kind === "pull" && sameModelId(modelOperation.model, selectedModelCard.id) ? "Downloading…" : "Download current model"}</button><span className="current-model-fit__note">Download the current model before testing it.</span></>}
+                    <button className="text-action" type="button" onClick={() => setShowAllModels(true)}>Open full catalog</button>
+                  </div>
                 </aside>
               )}
-              <div className="model-catalog-heading"><div><p className="section-label">Memory-aware catalog</p><h3>{memoryBudgetPending ? `Pending fit for ${effectiveMemoryBudget} GB` : `Model fit for ${effectiveMemoryBudget} GB`} · {preferences.contextWindowTokens / 1024}K single local chat</h3></div><p>{memoryBudgetPending ? "Apply the custom budget to re-rank these cards." : "Recommended cards lead the catalog; your selected model stays visible even when it needs a test."}</p></div>
-              <div className="model-grid">
-                {modelCards.map((setupModel) => {
-                  const fallback = modelCatalog[setupModel.id];
-                  const id = setupModel.id;
-                  const installed = setupModel.installed ?? isInstalledModel(id, status?.model.installedModels ?? []);
-                  const selected = status?.model.selectedModel === id;
-                  const working = modelOperation?.model === id;
-                  const pulling = modelOperation?.kind === "pull" && modelOperation.model === id;
-                  const progress = pulling && pullProgress?.model === id ? pullProgress : null;
-                  const fit = setupModel.fit;
-                  const knownWarning = modelKnownWarnings[id];
-                  return <article className={`model-card ${selected ? "is-selected" : ""} model-card--${fit?.fit ?? "unknown"}`} key={id}>
-                    <div><p className="section-label">{setupModel.role ?? fallback?.role ?? "Catalog model"}</p><h3>{setupModel.label ?? fallback?.label ?? id}</h3><p>{fit?.message ?? setupModel.memoryBand ?? fallback?.memoryBand ?? "Fit estimate becomes available after the local setup check."}</p></div>
-                    <dl><div><dt>Package</dt><dd>{setupModel.downloadSize ?? fallback?.downloadSize ?? "Reported by Ollama during download"}</dd></div><div><dt>Context</dt><dd>{setupModel.recommendedContext ?? fallback?.context ?? "32K target"}</dd></div></dl>
-                    {knownWarning && <small className="model-card__warning">{knownWarning}</small>}
-                    <div className="model-card__actions">
-                      {fit && <StatusPill tone={modelFitTone(fit)}>{fit.requiresTest && fit.fit === "recommended" ? "TEST RECOMMENDED" : modelFitLabel(fit).toUpperCase()}</StatusPill>}
-                      {installed ? <StatusPill tone="success">INSTALLED</StatusPill> : pulling ? <div className="model-pull-progress"><progress max="100" value={progress?.percent} /><span>{progress?.percent !== undefined ? `${Math.round(progress.percent)}% · ${progress.status}` : progress?.status ?? "Starting download…"}</span><button className="secondary-action" onClick={() => void cancelPullModel(id)}>Cancel</button></div> : <button className="secondary-action" onClick={() => void handlePullModel(id)} disabled={Boolean(working)} title="Downloads this model only; it will not change your active model">{failedPullModel === id ? "Retry download" : "Download"}</button>}
-                      {installed && <button className="text-action" onClick={() => void handleTestModel(id)} disabled={Boolean(working)}>{working && modelOperation?.kind === "test" ? "Testing…" : "Test at 32K"}</button>}
-                      {installed && !selected && <button className="text-action" onClick={() => void selectModel(id)} disabled={busy || memoryBudgetBusy}>Use this model</button>}
-                    </div>
-                  </article>;
-                })}
+              <div className="model-catalog-heading" id="recommended-models"><div><p className="section-label">Recommended local models</p><h3>{memoryBudgetPending ? `Pending shortlist for ${effectiveMemoryBudget} GB` : `Best fit for ${hardwareProfileLabel}`} · 32K context</h3></div><p>Only models that comfortably fit this hardware profile and one 32K conversation appear here. Kairos shows at most four.</p></div>
+              {recommendedModelCards.length > 0 ? <div className="model-grid">{recommendedModelCards.map((setupModel) => renderModelCard(setupModel, "recommended"))}</div> : <p className="model-catalog-empty">No additional model is recommended for this exact plan. Your current model remains unchanged; adjust the plan or open the full catalog to inspect test-required options.</p>}
+              <div className="model-catalog-disclosure">
+                <div><strong>Advanced catalog</strong><p>Potentially tight, specialist, unsupported, or test-required models stay out of the default shortlist.</p></div>
+                <button className="secondary-action" type="button" onClick={() => setShowAllModels((visible) => !visible)} aria-expanded={showAllModels} aria-controls="advanced-model-catalog">{showAllModels ? "Hide all models" : "Show all models"}</button>
               </div>
+              {showAllModels && <div id="advanced-model-catalog">{advancedModelCards.length > 0 ? <div className="model-grid model-grid--advanced">{advancedModelCards.map((setupModel) => renderModelCard(setupModel, "advanced"))}</div> : <p className="model-catalog-empty">No additional catalog models are available for this setup.</p>}</div>}
               {setupFeedback && <p className="settings-feedback">{setupFeedback}</p>}
             </section>
 
@@ -2157,7 +2341,12 @@ export default function App() {
                 <label className="field-label"><span>Active provider</span><select value={providerId} onChange={(event) => setProviderId(event.target.value as ProviderId)}>{providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}</select></label>
                 <p className="provider-detail">{activeProvider.detail}</p>
                 {activeProvider.id === "ollama" ? (
-                  <label className="field-label"><span>Active local model</span><select value={status?.model.selectedModel ?? ""} onChange={(event) => void selectModel(event.target.value)} disabled={!status || busy || !nativeRuntime}>{status?.model.choices.map((choice) => <option key={choice.id} value={choice.id}>{choice.label}</option>)}</select></label>
+                  <label className="field-label"><span>Active local model</span><select value={selectedInstalledOllamaModel} onChange={(event) => void selectModel(event.target.value)} disabled={!status || busy || !nativeRuntime || installedOllamaChoices.length === 0}>
+                    {!status && <option value="">Checking installed models…</option>}
+                    {status && installedOllamaChoices.length === 0 && <option value="">No installed local model</option>}
+                    {status && !selectedInstalledOllamaModel && installedOllamaChoices.length > 0 && <option value="" disabled>Current model is not installed</option>}
+                    {installedOllamaChoices.map((choice) => <option key={choice.id} value={choice.id}>{choice.label}</option>)}
+                  </select></label>
                 ) : (
                   <>
                     <div className="provider-boundary"><strong>Cloud consent boundary</strong><span>Every turn shows the outgoing message, approved notes, temporary-file extraction, destination, and model before it is sent. Keys stay in macOS Keychain when connected natively.</span></div>

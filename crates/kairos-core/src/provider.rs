@@ -14,6 +14,7 @@ use crate::{ContextPack, CoreError, DEFAULT_OLLAMA_ENDPOINT, LocalModelSettings,
 const OLLAMA_TAGS_PATH: &str = "/api/tags";
 const OLLAMA_CHAT_PATH: &str = "/api/chat";
 const OLLAMA_PULL_PATH: &str = "/api/pull";
+const OLLAMA_PS_PATH: &str = "/api/ps";
 const MAX_CHAT_OUTPUT_TOKENS: u32 = 2_048;
 const CLI_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -59,7 +60,12 @@ pub struct OllamaPullProgress {
 #[serde(rename_all = "camelCase")]
 pub struct OllamaModelTest {
     pub model: String,
+    pub resolved_model: String,
     pub passed: bool,
+    pub context_window_tokens: u32,
+    pub runtime_vram_bytes: Option<u64>,
+    pub installed_digest: Option<String>,
+    pub installed_quantization: Option<String>,
     pub message: String,
 }
 
@@ -81,6 +87,8 @@ pub struct OllamaStatus {
 pub struct InstalledModel {
     pub id: String,
     pub size_bytes: Option<u64>,
+    pub digest: Option<String>,
+    pub quantization: Option<String>,
 }
 
 /// Provider-specific adapter. Future cloud adapters can live beside this type
@@ -101,6 +109,16 @@ struct OllamaTag {
     name: String,
     #[serde(default)]
     size: Option<u64>,
+    #[serde(default)]
+    digest: Option<String>,
+    #[serde(default)]
+    details: OllamaTagDetails,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OllamaTagDetails {
+    #[serde(default)]
+    quantization_level: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +138,23 @@ struct OllamaChatStreamWire {
     #[serde(default)]
     done: bool,
     error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaPsResponse {
+    #[serde(default)]
+    models: Vec<OllamaRunningModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaRunningModel {
+    name: String,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    size_vram: Option<u64>,
+    #[serde(default)]
+    context_length: Option<u32>,
 }
 
 fn local_endpoint(settings: &LocalModelSettings) -> Result<String> {
@@ -158,6 +193,10 @@ fn resolve_installed_model(installed_models: &[String], selected_model: &str) ->
         }
     }
     None
+}
+
+fn same_ollama_model(left: &str, right: &str) -> bool {
+    left.trim().trim_end_matches(":latest") == right.trim().trim_end_matches(":latest")
 }
 
 fn unavailable_status(settings: &LocalModelSettings, message: String) -> OllamaStatus {
@@ -227,6 +266,8 @@ async fn inspect_ollama(settings: &LocalModelSettings) -> OllamaStatus {
         .map(|tag| InstalledModel {
             id: tag.name,
             size_bytes: tag.size,
+            digest: tag.digest,
+            quantization: tag.details.quantization_level,
         })
         .collect::<Vec<_>>();
     installed_model_sizes.sort_by(|left, right| left.id.cmp(&right.id));
@@ -493,6 +534,10 @@ pub async fn test_ollama_model(
 ) -> Result<OllamaModelTest> {
     let mut test_settings = settings.clone();
     test_settings.set_selected_model(model)?;
+    // This is a setup verification, not a user preference edit. It always
+    // proves the advertised 32K target and never persists or lowers the
+    // active chat context window.
+    test_settings.context_window_tokens = crate::DEFAULT_CONTEXT_WINDOW_TOKENS;
     let status = ollama_status(&test_settings).await;
     if !status.running || !status.selected_model_installed {
         return Err(CoreError::Ollama(status.setup_message.unwrap_or_else(
@@ -502,6 +547,10 @@ pub async fn test_ollama_model(
     let resolved_model = status.resolved_model.ok_or_else(|| {
         CoreError::Ollama("selected local Ollama model could not be resolved".to_owned())
     })?;
+    let installed_artifact = status
+        .installed_model_sizes
+        .iter()
+        .find(|installed| same_ollama_model(&installed.id, &resolved_model));
     let response = ollama_client(Duration::from_secs(90))
         .post(endpoint_url(&test_settings, OLLAMA_CHAT_PATH)?)
         .json(&json!({
@@ -510,7 +559,7 @@ pub async fn test_ollama_model(
             "keep_alive": "5m",
             "options": {
                 "temperature": 0,
-                "num_ctx": test_settings.context_window_tokens,
+                "num_ctx": crate::DEFAULT_CONTEXT_WINDOW_TOKENS,
                 "num_predict": 12
             },
             "messages": [{"role": "user", "content": "Reply with the word READY."}]
@@ -527,16 +576,76 @@ pub async fn test_ollama_model(
                 "local model test returned unreadable output: {error}"
             ))
         })?;
-    let reply = response.message.content.trim();
-    if reply.is_empty() {
-        return Err(CoreError::Ollama(
-            "local model test returned an empty answer".to_owned(),
-        ));
+    // The setup test proves real loading and requested-context allocation,
+    // not answer quality. Thinking-capable models may spend a tiny fixed
+    // token allowance on hidden reasoning and return an empty visible answer;
+    // `/api/ps` below is the authoritative runtime confirmation.
+    let _visible_reply = response.message.content.trim();
+    let running = ollama_client(Duration::from_secs(15))
+        .get(endpoint_url(&test_settings, OLLAMA_PS_PATH)?)
+        .send()
+        .await
+        .map_err(|error| {
+            CoreError::Ollama(format!("could not inspect the loaded 32K model: {error}"))
+        })?
+        .error_for_status()
+        .map_err(|error| {
+            CoreError::Ollama(format!(
+                "Ollama did not report the loaded 32K model: {error}"
+            ))
+        })?
+        .json::<OllamaPsResponse>()
+        .await
+        .map_err(|error| {
+            CoreError::Ollama(format!(
+                "Ollama returned an unreadable running-model report: {error}"
+            ))
+        })?;
+    let runtime = running
+        .models
+        .iter()
+        .find(|running| {
+            same_ollama_model(&running.name, &resolved_model)
+                || running
+                    .model
+                    .as_deref()
+                    .is_some_and(|identifier| same_ollama_model(identifier, &resolved_model))
+        })
+        .ok_or_else(|| {
+            CoreError::Ollama(
+                "Ollama answered the test but did not report the model as loaded; it was not marked verified."
+                    .to_owned(),
+            )
+        })?;
+    let actual_context = runtime.context_length.ok_or_else(|| {
+        CoreError::Ollama(
+            "Ollama did not report the loaded context length; the model was not marked verified."
+                .to_owned(),
+        )
+    })?;
+    if actual_context < crate::DEFAULT_CONTEXT_WINDOW_TOKENS {
+        return Err(CoreError::Ollama(format!(
+            "Ollama loaded {} at {}K rather than the requested 32K; Kairos did not lower context or mark it verified.",
+            resolved_model,
+            actual_context / 1024
+        )));
     }
     Ok(OllamaModelTest {
         model: model.to_owned(),
+        resolved_model: resolved_model.clone(),
         passed: true,
-        message: format!("{model} answered locally with the configured context window."),
+        context_window_tokens: crate::DEFAULT_CONTEXT_WINDOW_TOKENS,
+        runtime_vram_bytes: runtime.size_vram,
+        installed_digest: installed_artifact.and_then(|artifact| artifact.digest.clone()),
+        installed_quantization: installed_artifact
+            .and_then(|artifact| artifact.quantization.clone()),
+        message: match runtime.size_vram {
+            Some(bytes) => format!(
+                "{resolved_model} passed a real local 32K test ({} GiB reported as loaded by Ollama).",
+                bytes as f64 / 1024_f64.powi(3)
+            ),
+            None => format!("{resolved_model} passed a real local 32K test."),
+        },
     })
 }
 
