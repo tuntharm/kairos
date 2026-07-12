@@ -1,8 +1,9 @@
 # Kairos
 
 Kairos is a local-only developer alpha for Tharm's distributed personal knowledge
-systems. It routes a question to authoritative notes, builds a bounded local
-context pack, and uses a loopback Ollama model to produce a grounded brief.
+systems. It routes a question to authoritative notes, retrieves a few relevant
+allowlisted notes, and uses a selected loopback Ollama model to produce a
+grounded brief.
 
 Kairos is not a second wiki and it does not share live chat memory between AI
 tools. The durable files in the connected brains remain the source of truth.
@@ -13,7 +14,30 @@ tools. The durable files in the connected brains remain the source of truth.
 2. Ask `What should I do next, and why?`.
 3. Kairos reads only its trusted, allowlisted startup notes and shows the local
    sources it used.
-4. Its built-in loopback Ollama adapter produces one cited next action.
+4. Its built-in loopback Ollama adapter produces one cited next action with the
+   explicitly selected local model.
+
+## Local model settings
+
+Kairos stores local inference settings in its existing registry at
+`~/Library/Application Support/Kairos/brains.json`:
+
+- Endpoint: `http://localhost:11434` only.
+- Default: `qwen3.6:35b-mlx`.
+- Fast router / manual fallback: `qwen3:8b`.
+- Optional alternatives: `gpt-oss:20b` and `glm-4.7-flash`.
+- Context window: 32,768 tokens (`num_ctx: 32768`).
+
+The desktop selector persists the chosen model. Kairos checks that Ollama is
+running and that the exact chosen model is installed before synthesis. It never
+silently switches to another model; instead it shows the relevant `ollama serve`
+or `ollama pull <model>` setup step. An untagged model may resolve only to its
+explicit `:latest` tag (for example, `glm-4.7-flash` →
+`glm-4.7-flash:latest`).
+
+Context stays bounded: Kairos reads its registered router/current-context notes
+first, then ranks at most three notes across the routed brains' explicit
+`retrievalAllow` scopes. It never inserts a whole vault into a model prompt.
 
 ## Development
 
@@ -22,7 +46,8 @@ pnpm install
 cargo test --workspace
 cargo run -p kairos-cli -- init
 cargo run -p kairos-cli -- doctor
-cargo run -p kairos-cli -- brief --offline
+cargo run -p kairos-cli -- model qwen3:8b
+cargo run -p kairos-cli -- brief
 pnpm --filter @kairos/desktop tauri dev
 ```
 
@@ -46,6 +71,10 @@ answers; see [docs/mcp.md](docs/mcp.md) for the exact boundary.
 ## Privacy defaults
 
 - The local model is the default. Cloud use is not implemented in this alpha.
+- The selected model is persisted and verified before every local synthesis;
+  there is no automatic model fallback.
+- Ollama receives a 32K token window and only a bounded retrieval pack, never a
+  whole vault.
 - `90_Private`, `#private`, and `agent_access: explicit_only` are withheld.
 - `startupAllow` is fail-closed: a startup file must be explicitly allowlisted
   before Kairos resolves or reads it.

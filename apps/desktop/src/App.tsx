@@ -4,7 +4,17 @@ import { invoke } from "@tauri-apps/api/core";
 type AppStatus = {
   configPath: string;
   initialized: boolean;
-  ollamaReachable: boolean;
+  model: {
+    endpoint: string;
+    selectedModel: string;
+    resolvedModel?: string;
+    contextWindowTokens: number;
+    running: boolean;
+    selectedModelInstalled: boolean;
+    installedModels: string[];
+    setupMessage?: string;
+    choices: Array<{ id: string; label: string; role: string }>;
+  };
 };
 
 type Source = {
@@ -50,6 +60,8 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const modelReady = Boolean(status?.model.running && status.model.selectedModelInstalled);
+
   const refreshStatus = async () => {
     try {
       setStatus(await invoke<AppStatus>("app_status"));
@@ -80,14 +92,29 @@ export default function App() {
     try {
       const current = await invoke<AppStatus>("app_status");
       setStatus(current);
-      if (current.ollamaReachable) {
-        const result = await invoke<LocalBrief>("brief_with_ollama");
-        setAnswer(result.answer);
-        setPack(result.context);
-      } else {
+      if (!current.model.running || !current.model.selectedModelInstalled) {
         setAnswer(null);
-        setPack(await invoke<ContextPack>("brief_context"));
+        setPack(null);
+        setError(current.model.setupMessage ?? "The selected local model is not ready yet.");
+        return;
       }
+      const result = await invoke<LocalBrief>("brief_with_ollama");
+      setAnswer(result.answer);
+      setPack(result.context);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const selectModel = async (model: string) => {
+    setBusy(true);
+    setError(null);
+    try {
+      setStatus(await invoke<AppStatus>("set_selected_model", { model }));
+      setAnswer(null);
+      setPack(null);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -112,15 +139,35 @@ export default function App() {
             {busy ? "Preparing…" : "Create my local Tharm registry"}
           </button>
         ) : (
-          <button onClick={brief} disabled={busy}>
+          <button onClick={brief} disabled={busy || !modelReady}>
             {busy ? "Composing…" : "Compose my brief"}
           </button>
         )}
+        {status?.initialized && (
+          <div className="model-settings">
+            <label htmlFor="local-model">Local model</label>
+            <select
+              id="local-model"
+              value={status.model.selectedModel}
+              disabled={busy}
+              onChange={(event) => void selectModel(event.target.value)}
+            >
+              {status.model.choices.map((choice) => (
+                <option key={choice.id} value={choice.id}>
+                  {choice.label} — {choice.role}
+                </option>
+              ))}
+            </select>
+            <small>
+              Saved locally · {status.model.contextWindowTokens / 1024}K context · {status.model.endpoint}
+            </small>
+          </div>
+        )}
         <small>
           {status?.initialized
-            ? status.ollamaReachable
-              ? "Local Ollama is available. No cloud fallback is enabled."
-              : "Context works now; start Ollama when you want local synthesis."
+            ? modelReady
+              ? `${status.model.resolvedModel ?? status.model.selectedModel} is ready. No cloud or automatic model fallback is enabled.`
+              : status.model.setupMessage ?? "The selected local model is not ready yet."
             : "This developer alpha creates a local registry only. It does not copy or modify your notes."}
         </small>
       </section>
@@ -143,7 +190,7 @@ export default function App() {
 
           {answer && (
             <article className="answer">
-              <p className="eyebrow">LOCAL QWEN3:8B</p>
+              <p className="eyebrow">LOCAL {status?.model.resolvedModel ?? status?.model.selectedModel}</p>
               <h3>{answer.action}</h3>
               <p>{answer.why}</p>
               <p className="muted">{answer.caveat}</p>

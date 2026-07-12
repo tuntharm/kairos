@@ -12,8 +12,10 @@ mod provider;
 mod routing;
 
 pub use config::{
-    BrainRecord, BrainRole, EgressPolicy, KairosConfig, ReadPolicy, WritePolicy,
-    application_support_dir, default_config_path, default_tharm_config, load_config, write_config,
+    BrainRecord, BrainRole, DEFAULT_CONTEXT_WINDOW_TOKENS, DEFAULT_LOCAL_MODEL,
+    DEFAULT_OLLAMA_ENDPOINT, EgressPolicy, FAST_ROUTER_MODEL, KairosConfig, LocalModelChoice,
+    LocalModelSettings, OPTIONAL_LOCAL_MODELS, ReadPolicy, WritePolicy, application_support_dir,
+    default_config_path, default_tharm_config, load_config, local_model_choices, write_config,
 };
 pub use context::{
     ContextPack, DeniedSource, SourceExcerpt, SourceRef, build_context, render_handoff,
@@ -21,7 +23,7 @@ pub use context::{
 pub use error::{CoreError, Result};
 pub use policy::{
     AccessDisposition, AccessGrant, ContentDestination, canonicalize_allowed_file,
-    enforce_content_egress, evaluate_access, preflight_startup_access,
+    enforce_content_egress, evaluate_access, preflight_retrieval_access, preflight_startup_access,
 };
-pub use provider::{BriefAnswer, ollama_reachable, synthesize_ollama};
+pub use provider::{BriefAnswer, OllamaProvider, OllamaStatus, ollama_status, synthesize_ollama};
 pub use routing::{RouteResult, RoutedBrain, route_query};

@@ -1,6 +1,11 @@
 {
-  "version": 1,
+  "version": 2,
   "sourceRouterPath": "/Users/you/.codex/brain_router.md",
+  "localModel": {
+    "ollamaEndpoint": "http://localhost:11434",
+    "selectedModel": "qwen3.6:35b-mlx",
+    "contextWindowTokens": 32768
+  },
   "brains": [
     {
       "id": "everyday",
@@ -12,6 +17,7 @@
       "enabled": true,
       "readPolicy": {
         "startupAllow": ["00_System/**/*.md"],
+        "retrievalAllow": ["01_Daily/**/*.md", "02_Projects/**/*.md", "04_Areas/**/*.md", "05_Knowledge/**/*.md"],
         "explicitOnlyPatterns": ["90_Private/**"],
         "denyPatterns": [".git/**", ".obsidian/**", ".env*", "Attachments/**"]
       },

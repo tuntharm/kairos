@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -7,12 +8,16 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     AccessDisposition, AccessGrant, BrainRecord, BrainRole, EgressPolicy, KairosConfig, ReadPolicy,
-    Result, WritePolicy, canonicalize_allowed_file, evaluate_access, preflight_startup_access,
-    route_query,
+    Result, WritePolicy, canonicalize_allowed_file, evaluate_access, preflight_retrieval_access,
+    preflight_startup_access, route_query,
 };
 
 pub const DEFAULT_MAX_DOCUMENT_CHARS: usize = 12_000;
 pub const DEFAULT_MAX_CONTEXT_CHARS: usize = 36_000;
+pub const DEFAULT_MAX_RETRIEVAL_SOURCES: usize = 3;
+const DEFAULT_MAX_RETRIEVAL_DOCUMENT_CHARS: usize = 8_000;
+const MAX_RETRIEVAL_SCAN_FILES: usize = 120;
+const MAX_RETRIEVAL_FILE_BYTES: u64 = 512_000;
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -94,6 +99,184 @@ fn source_paths(brain: &BrainRecord) -> Vec<&str> {
         .chain(brain.context_paths.iter())
         .map(String::as_str)
         .collect()
+}
+
+fn query_terms(query: &str) -> Vec<String> {
+    const STOP_WORDS: &[&str] = &[
+        "about", "after", "and", "are", "for", "from", "next", "should", "that", "the", "this",
+        "today", "what", "when", "where", "which", "why", "with", "would", "your",
+    ];
+    let mut terms = query
+        .split(|character: char| !character.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|term| term.len() >= 3 && !STOP_WORDS.contains(&term.as_str()))
+        .collect::<Vec<_>>();
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+fn relevance_score(terms: &[String], relative_path: &str, text: &str) -> usize {
+    let path = relative_path.to_lowercase();
+    let text = text.to_lowercase();
+    terms
+        .iter()
+        .map(|term| {
+            let path_score = usize::from(path.contains(term)) * 3;
+            let text_score = text.match_indices(term).take(4).count();
+            path_score + text_score
+        })
+        .sum()
+}
+
+fn collect_retrieval_paths(
+    brain: &BrainRecord,
+    root: &Path,
+    directory: &Path,
+    grants: &[AccessGrant],
+    paths: &mut Vec<String>,
+) -> Result<()> {
+    if paths.len() >= MAX_RETRIEVAL_SCAN_FILES {
+        return Ok(());
+    }
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(_) => return Ok(()),
+    };
+    for entry in entries.flatten() {
+        if paths.len() >= MAX_RETRIEVAL_SCAN_FILES {
+            break;
+        }
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        let path = entry.path();
+        let relative = match path.strip_prefix(root) {
+            Ok(relative) => relative.to_string_lossy().replace('\\', "/"),
+            Err(_) => continue,
+        };
+        if file_type.is_dir() {
+            if relative
+                .split('/')
+                .any(|component| component.starts_with('.'))
+            {
+                continue;
+            }
+            let probe = format!("{relative}/__kairos_retrieval_probe__.md");
+            if preflight_retrieval_access(brain, &probe, grants)? == AccessDisposition::Allowed {
+                collect_retrieval_paths(brain, root, &path, grants, paths)?;
+            }
+            continue;
+        }
+        if file_type.is_file()
+            && path.extension().and_then(|extension| extension.to_str()) == Some("md")
+            && preflight_retrieval_access(brain, &relative, grants)? == AccessDisposition::Allowed
+        {
+            paths.push(relative);
+        }
+    }
+    Ok(())
+}
+
+struct RetrievalState<'a> {
+    sources: &'a mut Vec<SourceExcerpt>,
+    freshness_warnings: &'a mut Vec<String>,
+    used: &'a mut usize,
+    total_limit: usize,
+    remaining_sources: &'a mut usize,
+}
+
+fn add_retrieved_sources(
+    brain: &BrainRecord,
+    query: &str,
+    grants: &[AccessGrant],
+    state: &mut RetrievalState<'_>,
+) -> Result<()> {
+    if *state.used >= state.total_limit || *state.remaining_sources == 0 {
+        return Ok(());
+    }
+    let terms = query_terms(query);
+    if terms.is_empty() || brain.read_policy.retrieval_allow.is_empty() {
+        return Ok(());
+    }
+    let root = match fs::canonicalize(&brain.root_path) {
+        Ok(root) => root,
+        Err(_) => return Ok(()),
+    };
+    let mut candidate_paths = Vec::new();
+    collect_retrieval_paths(brain, &root, &root, grants, &mut candidate_paths)?;
+    candidate_paths.sort();
+    candidate_paths.dedup();
+
+    let existing_ids = state
+        .sources
+        .iter()
+        .map(|source| source.source.id.clone())
+        .collect::<HashSet<_>>();
+    let mut ranked = Vec::new();
+    for relative_path in candidate_paths {
+        let source_id = format!("{}:{relative_path}", brain.id);
+        if existing_ids.contains(&source_id) {
+            continue;
+        }
+        let canonical = match canonicalize_allowed_file(brain, &relative_path) {
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        if fs::metadata(&canonical)
+            .map(|metadata| metadata.len() > MAX_RETRIEVAL_FILE_BYTES)
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        let text = match fs::read_to_string(&canonical) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
+        if evaluate_access(brain, &relative_path, &text, grants)? != AccessDisposition::Allowed {
+            continue;
+        }
+        let score = relevance_score(&terms, &relative_path, &text);
+        if score > 0 {
+            ranked.push((score, relative_path, canonical, text));
+        }
+    }
+    ranked.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+
+    for (_, relative_path, canonical, text) in ranked {
+        if *state.used >= state.total_limit || *state.remaining_sources == 0 {
+            break;
+        }
+        let available = state.total_limit.saturating_sub(*state.used);
+        let (content, truncated) =
+            truncate_at_boundary(&text, DEFAULT_MAX_RETRIEVAL_DOCUMENT_CHARS.min(available));
+        *state.used += content.len();
+        *state.remaining_sources -= 1;
+        if let Some(review_after) = review_after(&text)
+            && review_after < Utc::now().date_naive()
+        {
+            state.freshness_warnings.push(format!(
+                "{} may be stale: its review_after date has passed.",
+                relative_path
+            ));
+        }
+        state.sources.push(SourceExcerpt {
+            source: SourceRef {
+                id: format!("{}:{relative_path}", brain.id),
+                brain_id: brain.id.clone(),
+                relative_path,
+                sha256: sha256(&text),
+                modified_at: modified_at(&canonical),
+            },
+            content,
+            truncated,
+        });
+    }
+    Ok(())
 }
 
 fn global_router_policy() -> BrainRecord {
@@ -239,8 +422,9 @@ fn add_global_router(
     Ok(())
 }
 
-/// Build a compact, cited local context pack. This alpha only reads registered
-/// startup paths; it intentionally does not perform an unbounded vault search.
+/// Build a compact, cited local context pack. Kairos always starts from the
+/// registered router/current-context sources, then adds only a few ranked notes
+/// from an explicit retrieval allowlist. It never inserts a whole vault.
 pub fn build_context(
     config: &KairosConfig,
     query: &str,
@@ -360,6 +544,23 @@ pub fn build_context(
         }
     }
 
+    let mut remaining_retrieval_sources = DEFAULT_MAX_RETRIEVAL_SOURCES;
+    {
+        let mut retrieval_state = RetrievalState {
+            sources: &mut sources,
+            freshness_warnings: &mut freshness_warnings,
+            used: &mut used,
+            total_limit,
+            remaining_sources: &mut remaining_retrieval_sources,
+        };
+        for routed in &route.brains {
+            let Some(brain) = config.brains.iter().find(|brain| brain.id == routed.id) else {
+                continue;
+            };
+            add_retrieved_sources(brain, query, grants, &mut retrieval_state)?;
+        }
+    }
+
     Ok(ContextPack {
         query: query.to_owned(),
         route,
@@ -406,20 +607,26 @@ pub fn render_handoff(pack: &ContextPack, target: &str, task: &str) -> String {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use crate::{BrainRole, EgressPolicy, ReadPolicy, WritePolicy};
+    use crate::{BrainRole, EgressPolicy, LocalModelSettings, ReadPolicy, WritePolicy};
+
+    static FIXTURE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn fixture_config() -> (KairosConfig, std::path::PathBuf) {
         let directory = std::env::temp_dir().join(format!(
-            "kairos-core-test-{}",
+            "kairos-core-test-{}-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            FIXTURE_COUNTER.fetch_add(1, Ordering::Relaxed),
         ));
         fs::create_dir_all(directory.join("00_System")).unwrap();
+        fs::create_dir_all(directory.join("02_Projects")).unwrap();
+        fs::create_dir_all(directory.join("90_Private")).unwrap();
         fs::write(
             directory.join("00_System/AI Brain Manager.md"),
             "---\nreview_after: 2099-01-01\n---\n# Router",
@@ -431,9 +638,20 @@ mod tests {
             "---\nreview_after: 2099-01-01\n---\n# Current",
         )
         .unwrap();
+        fs::write(
+            directory.join("02_Projects/Plate Experiment.md"),
+            "# Abaqus plate experiment\n\nRank this experiment above unrelated work.",
+        )
+        .unwrap();
+        fs::write(
+            directory.join("90_Private/Hidden Plate.md"),
+            "# Abaqus private experiment",
+        )
+        .unwrap();
         let config = KairosConfig {
             version: 1,
             source_router_path: directory.join("router.md"),
+            local_model: LocalModelSettings::default(),
             brains: vec![BrainRecord {
                 id: "everyday".to_owned(),
                 name: "Everyday".to_owned(),
@@ -444,6 +662,11 @@ mod tests {
                 enabled: true,
                 read_policy: ReadPolicy {
                     startup_allow: vec!["00_System/**/*.md".to_owned()],
+                    retrieval_allow: vec![
+                        "02_Projects/**/*.md".to_owned(),
+                        "90_Private/**/*.md".to_owned(),
+                    ],
+                    explicit_only_patterns: vec!["90_Private/**".to_owned()],
                     ..Default::default()
                 },
                 egress_policy: EgressPolicy::LocalOnly,
@@ -471,6 +694,36 @@ mod tests {
                 .iter()
                 .all(|source| source.source.id.starts_with("everyday:"))
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn retrieval_adds_relevant_allowed_notes_without_exposing_private_candidates() {
+        let (config, directory) = fixture_config();
+        let pack = build_context(
+            &config,
+            "Which Abaqus plate experiment comes next?",
+            None,
+            &[],
+            None,
+        )
+        .unwrap();
+        assert!(
+            pack.sources
+                .iter()
+                .any(|source| { source.source.id == "everyday:02_Projects/Plate Experiment.md" })
+        );
+        assert!(
+            pack.sources
+                .iter()
+                .all(|source| !source.source.relative_path.contains("90_Private"))
+        );
+        assert!(
+            pack.freshness_warnings
+                .iter()
+                .all(|warning| !warning.contains("Hidden Plate"))
+        );
+
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -35,6 +35,11 @@ kbd { border: 1px solid rgba(255,255,255,.16); padding: 7px 10px; border-radius:
 button { border: 0; border-radius: 11px; padding: 11px 15px; color: #06231f; background: #5eead4; cursor: pointer; font-weight: 750; }
 button:hover { background: #99f6e4; }
 button:disabled { opacity: .58; cursor: wait; }
+.model-settings { display: grid; gap: 6px; margin-top: 16px; max-width: 440px; }
+.model-settings label { color: #dbeafe; font-size: .8rem; font-weight: 700; }
+.model-settings select { width: 100%; border: 1px solid rgba(255,255,255,.18); border-radius: 9px; padding: 9px 10px; color: #e2e8f0; background: rgba(2, 6, 23, .62); font: inherit; }
+.model-settings select:disabled { opacity: .62; }
+.model-settings small { font-size: .75rem; }
 small, .muted { color: #94a3b8; line-height: 1.45; }
 .hero small { display: block; margin-top: 13px; }
 .error { color: #fecaca; padding: 12px 0 0; }

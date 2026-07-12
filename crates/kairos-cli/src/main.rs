@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use kairos_core::{
     ContentDestination, ContextPack, build_context, default_config_path, default_tharm_config,
-    enforce_content_egress, load_config, ollama_reachable, render_handoff, route_query,
+    enforce_content_egress, load_config, ollama_status, render_handoff, route_query,
     synthesize_ollama, write_config,
 };
 use serde_json::{Value, json};
@@ -26,6 +26,11 @@ enum Command {
     },
     /// Check local brain paths and the Ollama loopback endpoint.
     Doctor,
+    /// Show or persist the selected local Ollama model.
+    Model {
+        /// A model identifier, for example qwen3:8b. Omit to inspect the saved selection.
+        model: Option<String>,
+    },
     /// Recommend a brain without reading arbitrary notes.
     Route {
         query: String,
@@ -40,8 +45,6 @@ enum Command {
     },
     /// Build the daily next-action context and optionally synthesize it locally.
     Brief {
-        #[arg(long, default_value = "qwen3:8b")]
-        model: String,
         #[arg(long)]
         offline: bool,
     },
@@ -104,12 +107,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     })
                 })
                 .collect();
-            let ollama = ollama_reachable().await;
+            let local_model = ollama_status(&config.local_model).await;
             print_json(&json!({
                 "configPath": path,
                 "sourceRouterExists": config.source_router_path.exists(),
                 "brains": brain_status,
-                "ollamaReachable": ollama,
+                "localModel": local_model,
+            }))?;
+        }
+        Command::Model { model } => {
+            let path = config_path(&cli)?;
+            let mut config = load(&cli)?;
+            if let Some(model) = model {
+                config.local_model.set_selected_model(model)?;
+                write_config(&path, &config, true)?;
+            }
+            print_json(&json!({
+                "localModel": ollama_status(&config.local_model).await,
             }))?;
         }
         Command::Route { query, brain } => {
@@ -124,7 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None,
             )?)?;
         }
-        Command::Brief { model, offline } => {
+        Command::Brief { offline } => {
             let config = load(&cli)?;
             let pack = context_for_brief(&config)?;
             if *offline {
@@ -136,24 +150,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ContentDestination::LocalOllama,
                     false,
                 )?;
-                match synthesize_ollama(model, &pack).await {
-                    Ok(answer) => {
-                        let sources = pack
-                            .sources
-                            .iter()
-                            .map(|excerpt| &excerpt.source)
-                            .collect::<Vec<_>>();
-                        print_json(&json!({
-                            "answer": answer,
-                            "sources": sources,
-                            "freshnessWarnings": pack.freshness_warnings,
-                        }))?
-                    }
-                    Err(error) => {
-                        eprintln!("Local Ollama synthesis is unavailable: {error}");
-                        print_json(&pack)?;
-                    }
-                }
+                let answer = synthesize_ollama(&config.local_model, &pack).await?;
+                let sources = pack
+                    .sources
+                    .iter()
+                    .map(|excerpt| &excerpt.source)
+                    .collect::<Vec<_>>();
+                print_json(&json!({
+                    "answer": answer,
+                    "sources": sources,
+                    "freshnessWarnings": pack.freshness_warnings,
+                }))?
             }
         }
         Command::Handoff {

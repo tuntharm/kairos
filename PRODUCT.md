@@ -15,6 +15,18 @@ The first user is Tharm on this Mac. The alpha must answer:
 without preloading whole vaults, inventing current state, or writing back to a
 brain.
 
+## Local inference policy
+
+- Ollama runs only at `http://localhost:11434`.
+- `qwen3.6:35b-mlx` is the saved default local model.
+- `qwen3:8b` is a fast, explicitly chosen router/manual-fallback option—not an
+  automatic downgrade.
+- `gpt-oss:20b` and `glm-4.7-flash` are optional alternatives.
+- The selected model and 32K token context setting live in local Kairos
+  settings. Kairos verifies both Ollama and the selected tag before use.
+- Retrieval starts from routed, allowlisted notes and caps the inserted evidence;
+  it never preloads a whole vault.
+
 ## Product boundary
 
 Kairos owns routing, context packing, provenance, and safety policy. It does
@@ -26,6 +38,7 @@ Codex, Claude, and Cursor.
 - Accounts, sync, telemetry, or hosted backends.
 - Generic multi-user onboarding.
 - Cloud inference or automatic cloud fallback.
+- Hidden model substitution when a selected local model is unavailable.
 - Note mutations, attachment ingestion, wake words, or autonomous coding.
 - Parsing every connected vault into an index.
 

@@ -111,10 +111,11 @@ fn has_matching_grant(brain: &BrainRecord, path: &str, grants: &[AccessGrant]) -
 
 /// Check a configured startup path before resolving or reading it. An empty
 /// `startup_allow` list deliberately means no startup files are approved.
-pub fn preflight_startup_access(
+fn preflight_path_access(
     brain: &BrainRecord,
     relative_path: &str,
     grants: &[AccessGrant],
+    allow_patterns: &[String],
 ) -> Result<AccessDisposition> {
     let relative_path = normalized_relative_path(relative_path)?;
     let relative = relative_path.to_string_lossy().replace('\\', "/");
@@ -122,7 +123,7 @@ pub fn preflight_startup_access(
     if matches_any(&relative, &brain.read_policy.deny_patterns)? {
         return Ok(AccessDisposition::Denied);
     }
-    if !matches_any(&relative, &brain.read_policy.startup_allow)? {
+    if !matches_any(&relative, allow_patterns)? {
         return Ok(AccessDisposition::Denied);
     }
     if matches_any(&relative, &brain.read_policy.explicit_only_patterns)?
@@ -131,6 +132,34 @@ pub fn preflight_startup_access(
         return Ok(AccessDisposition::ExplicitRequestRequired);
     }
     Ok(AccessDisposition::Allowed)
+}
+
+pub fn preflight_startup_access(
+    brain: &BrainRecord,
+    relative_path: &str,
+    grants: &[AccessGrant],
+) -> Result<AccessDisposition> {
+    preflight_path_access(
+        brain,
+        relative_path,
+        grants,
+        &brain.read_policy.startup_allow,
+    )
+}
+
+/// Check a candidate retrieval path before Kairos resolves, ranks, or reads it.
+/// An empty `retrieval_allow` list deliberately disables query retrieval.
+pub fn preflight_retrieval_access(
+    brain: &BrainRecord,
+    relative_path: &str,
+    grants: &[AccessGrant],
+) -> Result<AccessDisposition> {
+    preflight_path_access(
+        brain,
+        relative_path,
+        grants,
+        &brain.read_policy.retrieval_allow,
+    )
 }
 
 /// Decide whether text can be surfaced. `visibility: private` is intentionally
@@ -235,7 +264,8 @@ pub fn canonicalize_allowed_file(brain: &BrainRecord, relative_path: &str) -> Re
 mod tests {
     use super::*;
     use crate::{
-        BrainRole, EgressPolicy, KairosConfig, ReadPolicy, RouteResult, RoutedBrain, WritePolicy,
+        BrainRole, EgressPolicy, KairosConfig, LocalModelSettings, ReadPolicy, RouteResult,
+        RoutedBrain, WritePolicy,
     };
 
     fn brain() -> BrainRecord {
@@ -294,11 +324,18 @@ mod tests {
     }
 
     #[test]
+    fn retrieval_allowlist_fails_closed() {
+        let result = preflight_retrieval_access(&brain(), "notes/context.md", &[]).unwrap();
+        assert_eq!(result, AccessDisposition::Denied);
+    }
+
+    #[test]
     fn external_egress_rejects_local_only_brains() {
         let brain = brain();
         let config = KairosConfig {
             version: 1,
             source_router_path: std::env::temp_dir().join("router.md"),
+            local_model: LocalModelSettings::default(),
             brains: vec![brain],
         };
         let route = RouteResult {
