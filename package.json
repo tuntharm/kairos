@@ -1,0 +1,10 @@
+{
+  "name": "kairos",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.0.0",
+  "scripts": {
+    "desktop:dev": "pnpm --filter @kairos/desktop tauri dev",
+    "desktop:build": "pnpm --filter @kairos/desktop tauri build"
+  }
+}

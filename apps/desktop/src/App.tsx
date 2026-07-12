@@ -1,0 +1,184 @@
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+
+type AppStatus = {
+  configPath: string;
+  initialized: boolean;
+  ollamaReachable: boolean;
+};
+
+type Source = {
+  source: {
+    id: string;
+    brainId: string;
+    relativePath: string;
+    modifiedAt?: string;
+  };
+  content: string;
+  truncated: boolean;
+};
+
+type ContextPack = {
+  query: string;
+  route: {
+    brains: Array<{ id: string; name: string; reason: string }>;
+    requiresChoice: boolean;
+  };
+  sources: Source[];
+  withheldSources: Array<{ brainId: string; reason: string }>;
+  freshnessWarnings: string[];
+};
+
+type BriefAnswer = {
+  action: string;
+  why: string;
+  caveat: string;
+  sourceIds: string[];
+};
+
+type LocalBrief = {
+  answer: BriefAnswer;
+  context: ContextPack;
+};
+
+const briefQuestion = "What should I do next, and why?";
+
+export default function App() {
+  const [status, setStatus] = useState<AppStatus | null>(null);
+  const [pack, setPack] = useState<ContextPack | null>(null);
+  const [answer, setAnswer] = useState<BriefAnswer | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const refreshStatus = async () => {
+    try {
+      setStatus(await invoke<AppStatus>("app_status"));
+    } catch (reason) {
+      setError(String(reason));
+    }
+  };
+
+  useEffect(() => {
+    void refreshStatus();
+  }, []);
+
+  const initialize = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      setStatus(await invoke<AppStatus>("initialize_tharm_profile"));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const brief = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      const current = await invoke<AppStatus>("app_status");
+      setStatus(current);
+      if (current.ollamaReachable) {
+        const result = await invoke<LocalBrief>("brief_with_ollama");
+        setAnswer(result.answer);
+        setPack(result.context);
+      } else {
+        setAnswer(null);
+        setPack(await invoke<ContextPack>("brief_context"));
+      }
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <main>
+      <header>
+        <div>
+          <p className="eyebrow">KAIROS · LOCAL-ONLY DEVELOPER ALPHA</p>
+          <h1>The right context,<br />at the right moment.</h1>
+        </div>
+        <kbd>⌥ Space</kbd>
+      </header>
+
+      <section className="hero">
+        <p>{briefQuestion}</p>
+        {!status?.initialized ? (
+          <button onClick={initialize} disabled={busy}>
+            {busy ? "Preparing…" : "Create my local Tharm registry"}
+          </button>
+        ) : (
+          <button onClick={brief} disabled={busy}>
+            {busy ? "Composing…" : "Compose my brief"}
+          </button>
+        )}
+        <small>
+          {status?.initialized
+            ? status.ollamaReachable
+              ? "Local Ollama is available. No cloud fallback is enabled."
+              : "Context works now; start Ollama when you want local synthesis."
+            : "This developer alpha creates a local registry only. It does not copy or modify your notes."}
+        </small>
+      </section>
+
+      {error && <p className="error">{error}</p>}
+
+      {pack && (
+        <section className="result">
+          <div className="route">
+            {pack.route.brains.map((brain) => (
+              <span key={brain.id}>{brain.name}</span>
+            ))}
+          </div>
+          <h2>Grounded context ready</h2>
+          <p className="muted">
+            Kairos selected the local sources below. Its built-in Ollama path can
+            synthesize from them locally; MCP is route-only in this alpha and
+            never transfers note text.
+          </p>
+
+          {answer && (
+            <article className="answer">
+              <p className="eyebrow">LOCAL QWEN3:8B</p>
+              <h3>{answer.action}</h3>
+              <p>{answer.why}</p>
+              <p className="muted">{answer.caveat}</p>
+              {answer.sourceIds.length > 0 && (
+                <p className="citation">
+                  Grounded in {answer.sourceIds.map((id) => <code key={id}>{id}</code>)}
+                </p>
+              )}
+            </article>
+          )}
+
+          {pack.freshnessWarnings.length > 0 && (
+            <aside>
+              {pack.freshnessWarnings.map((warning) => <p key={warning}>{warning}</p>)}
+            </aside>
+          )}
+
+          <div className="sources">
+            {pack.sources.map(({ source, content, truncated }) => (
+              <details key={source.id}>
+                <summary>
+                  <span>{source.brainId}</span>
+                  {source.relativePath}
+                </summary>
+                <pre>{content}</pre>
+                {truncated && <small>Source was bounded before it reached a model.</small>}
+              </details>
+            ))}
+          </div>
+
+          {pack.withheldSources.length > 0 && (
+            <p className="muted">Protected sources were withheld by policy.</p>
+          )}
+        </section>
+      )}
+    </main>
+  );
+}

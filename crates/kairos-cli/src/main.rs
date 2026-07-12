@@ -1,0 +1,169 @@
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
+use kairos_core::{
+    ContentDestination, ContextPack, build_context, default_config_path, default_tharm_config,
+    enforce_content_egress, load_config, ollama_reachable, render_handoff, route_query,
+    synthesize_ollama, write_config,
+};
+use serde_json::{Value, json};
+
+#[derive(Parser, Debug)]
+#[command(name = "kairos", about = "Local-first brain composer")]
+struct Cli {
+    #[arg(long, global = true)]
+    config: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Write the personal Tharm profile to Application Support/Kairos.
+    Init {
+        #[arg(long)]
+        force: bool,
+    },
+    /// Check local brain paths and the Ollama loopback endpoint.
+    Doctor,
+    /// Recommend a brain without reading arbitrary notes.
+    Route {
+        query: String,
+        #[arg(long)]
+        brain: Option<String>,
+    },
+    /// Emit a bounded, cited context pack.
+    Context {
+        query: String,
+        #[arg(long)]
+        brain: Option<String>,
+    },
+    /// Build the daily next-action context and optionally synthesize it locally.
+    Brief {
+        #[arg(long, default_value = "qwen3:8b")]
+        model: String,
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Render a copyable handoff without writing into a brain.
+    Handoff {
+        target: String,
+        task: String,
+        #[arg(long, default_value = "What should I do next, and why?")]
+        query: String,
+    },
+}
+
+fn config_path(cli: &Cli) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    Ok(cli.config.clone().unwrap_or(default_config_path()?))
+}
+
+fn load(cli: &Cli) -> Result<kairos_core::KairosConfig, Box<dyn std::error::Error>> {
+    Ok(load_config(config_path(cli)?)?)
+}
+
+fn print_json(value: &impl serde::Serialize) -> Result<(), Box<dyn std::error::Error>> {
+    println!("{}", serde_json::to_string_pretty(value)?);
+    Ok(())
+}
+
+fn context_for_brief(
+    config: &kairos_core::KairosConfig,
+) -> Result<ContextPack, Box<dyn std::error::Error>> {
+    Ok(build_context(
+        config,
+        "What should I do next, and why?",
+        None,
+        &[],
+        None,
+    )?)
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+    match &cli.command {
+        Command::Init { force } => {
+            let path = config_path(&cli)?;
+            let config = default_tharm_config()?;
+            write_config(&path, &config, *force)?;
+            println!("Initialized Kairos profile at {}", path.display());
+        }
+        Command::Doctor => {
+            let path = config_path(&cli)?;
+            let config = load(&cli)?;
+            let brain_status: Vec<Value> = config
+                .brains
+                .iter()
+                .map(|brain| {
+                    json!({
+                        "id": brain.id,
+                        "enabled": brain.enabled,
+                        "rootExists": brain.root_path.exists(),
+                        "egressPolicy": brain.egress_policy,
+                    })
+                })
+                .collect();
+            let ollama = ollama_reachable().await;
+            print_json(&json!({
+                "configPath": path,
+                "sourceRouterExists": config.source_router_path.exists(),
+                "brains": brain_status,
+                "ollamaReachable": ollama,
+            }))?;
+        }
+        Command::Route { query, brain } => {
+            print_json(&route_query(&load(&cli)?, query, brain.as_deref())?)?;
+        }
+        Command::Context { query, brain } => {
+            print_json(&build_context(
+                &load(&cli)?,
+                query,
+                brain.as_deref(),
+                &[],
+                None,
+            )?)?;
+        }
+        Command::Brief { model, offline } => {
+            let config = load(&cli)?;
+            let pack = context_for_brief(&config)?;
+            if *offline {
+                print_json(&pack)?;
+            } else {
+                enforce_content_egress(
+                    &config,
+                    &pack.route,
+                    ContentDestination::LocalOllama,
+                    false,
+                )?;
+                match synthesize_ollama(model, &pack).await {
+                    Ok(answer) => {
+                        let sources = pack
+                            .sources
+                            .iter()
+                            .map(|excerpt| &excerpt.source)
+                            .collect::<Vec<_>>();
+                        print_json(&json!({
+                            "answer": answer,
+                            "sources": sources,
+                            "freshnessWarnings": pack.freshness_warnings,
+                        }))?
+                    }
+                    Err(error) => {
+                        eprintln!("Local Ollama synthesis is unavailable: {error}");
+                        print_json(&pack)?;
+                    }
+                }
+            }
+        }
+        Command::Handoff {
+            target,
+            task,
+            query,
+        } => {
+            let pack = build_context(&load(&cli)?, query, None, &[], None)?;
+            print!("{}", render_handoff(&pack, target, task));
+        }
+    }
+    Ok(())
+}

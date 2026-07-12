@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "sourceRouterPath": "/Users/you/.codex/brain_router.md",
+  "brains": [
+    {
+      "id": "everyday",
+      "name": "Everyday Life Brain",
+      "role": "everyday",
+      "rootPath": "/Users/you/everyday-life-brain",
+      "routerPaths": ["00_System/AI Brain Manager.md"],
+      "contextPaths": ["00_System/Tharm Model.md", "00_System/Current Context.md"],
+      "enabled": true,
+      "readPolicy": {
+        "startupAllow": ["00_System/**/*.md"],
+        "explicitOnlyPatterns": ["90_Private/**"],
+        "denyPatterns": [".git/**", ".obsidian/**", ".env*", "Attachments/**"]
+      },
+      "egressPolicy": "local_only",
+      "writePolicy": "read_only"
+    }
+  ]
+}
