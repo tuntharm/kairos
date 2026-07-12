@@ -27,4 +27,6 @@ pub enum CoreError {
     NoEnabledBrain,
     #[error("local Ollama error: {0}")]
     Ollama(String),
+    #[error("inference provider error: {0}")]
+    Provider(String),
 }

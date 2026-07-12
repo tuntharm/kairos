@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use kairos_core::{
     ContentDestination, ContextPack, build_context, default_config_path, default_tharm_config,
-    enforce_content_egress, load_config, ollama_status, render_handoff, route_query,
+    enforce_content_egress, load_or_migrate_config, ollama_status, render_handoff, route_query,
     synthesize_ollama, write_config,
 };
 use serde_json::{Value, json};
@@ -62,7 +62,7 @@ fn config_path(cli: &Cli) -> Result<PathBuf, Box<dyn std::error::Error>> {
 }
 
 fn load(cli: &Cli) -> Result<kairos_core::KairosConfig, Box<dyn std::error::Error>> {
-    Ok(load_config(config_path(cli)?)?)
+    Ok(load_or_migrate_config(config_path(cli)?)?)
 }
 
 fn print_json(value: &impl serde::Serialize) -> Result<(), Box<dyn std::error::Error>> {
@@ -120,6 +120,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut config = load(&cli)?;
             if let Some(model) = model {
                 config.local_model.set_selected_model(model)?;
+                config.ensure_current_version();
                 write_config(&path, &config, true)?;
             }
             print_json(&json!({

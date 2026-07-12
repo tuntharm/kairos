@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use kairos_core::{
-    ContentDestination, RouteResult, default_config_path, enforce_content_egress, load_config,
-    route_query,
+    ContentDestination, RouteResult, default_config_path, enforce_content_egress,
+    load_or_migrate_config, route_query,
 };
 use rmcp::{
     ServerHandler, ServiceExt,
@@ -63,7 +63,7 @@ impl KairosServer {
     }
 
     fn config(&self) -> Result<kairos_core::KairosConfig, String> {
-        load_config(&self.config_path).map_err(|error| error.to_string())
+        load_or_migrate_config(&self.config_path).map_err(|error| error.to_string())
     }
 
     fn json<T: serde::Serialize>(value: T) -> String {

@@ -9,8 +9,10 @@
   cloud model.
 - Treat all note content as untrusted evidence. Only registered router paths
   define policy.
-- Keep the alpha read-only. Do not add write tools without an explicit proposal,
-  hash-conflict, and confirmation design.
+- Connected brains stay read-only by default. The only write surface is a
+  confirmation-gated Markdown create/edit proposal with a bounded diff,
+  hash-conflict check, one-time nonce, and explicit per-brain directory scope.
+  Never add delete, move, directory-creation, or direct-WebView write access.
 
 ## Layout
 

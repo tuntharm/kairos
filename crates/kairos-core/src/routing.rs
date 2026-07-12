@@ -42,6 +42,12 @@ const BRIEF_HINTS: &[&str] = &[
     "today",
 ];
 
+/// Internal query used only by the What Next dashboard. It deliberately
+/// selects the Everyday and PhD context together when both are available;
+/// ordinary mixed questions continue to avoid broadcasting into both brains.
+pub const CROSS_BRAIN_PULSE_QUERY: &str =
+    "kairos cross-brain pulse: personal everyday life and phd research priorities";
+
 fn keyword_score(query: &str, keywords: &[&str]) -> u32 {
     keywords
         .iter()
@@ -50,14 +56,23 @@ fn keyword_score(query: &str, keywords: &[&str]) -> u32 {
 }
 
 fn score(brain: &BrainRecord, query: &str) -> u32 {
-    match brain.id.as_str() {
+    let configured_score = brain
+        .routing_hints
+        .iter()
+        .map(|hint| hint.trim().to_lowercase())
+        .filter(|hint| hint.len() >= 2 && query.contains(hint.as_str()))
+        .count() as u32;
+    let legacy_score = match brain.id.as_str() {
         "phd" => keyword_score(query, PHD_HINTS),
         "datter" => keyword_score(query, DATTER_HINTS),
         "border-fiber" => keyword_score(query, BORDER_HINTS),
         "everyday" if BRIEF_HINTS.iter().any(|hint| query.contains(hint)) => 4,
         "everyday" => 1,
         _ => 0,
-    }
+    };
+    // Human-configured hints are deliberate routing metadata and take
+    // precedence over the historic ID-specific vocabulary.
+    configured_score.saturating_mul(5).max(legacy_score)
 }
 
 pub fn route_query(
@@ -70,6 +85,7 @@ pub fn route_query(
         return Err(CoreError::InvalidPath("query must not be empty".to_owned()));
     }
     let lower = query.to_lowercase();
+    let is_cross_brain_pulse = lower == CROSS_BRAIN_PULSE_QUERY;
     if let Some(override_id) = brain_override {
         let brain = config
             .brains
@@ -111,9 +127,10 @@ pub fn route_query(
 
     // Everyday is the helpful fallback, not automatic extra context for a
     // clearly-owned specialist question such as Abaqus/PhD work.
-    if candidates
-        .iter()
-        .any(|(score, brain)| brain.id != "everyday" && *score > 0)
+    if !is_cross_brain_pulse
+        && candidates
+            .iter()
+            .any(|(score, brain)| brain.id != "everyday" && *score > 0)
     {
         candidates.retain(|(_, brain)| brain.id != "everyday");
     }
@@ -135,14 +152,17 @@ pub fn route_query(
     });
     candidates.truncate(2);
 
-    let requires_choice = candidates.len() > 1 && candidates[0].0 == candidates[1].0;
+    let requires_choice =
+        !is_cross_brain_pulse && candidates.len() > 1 && candidates[0].0 == candidates[1].0;
     let brains = candidates
         .into_iter()
         .map(|(score, brain)| RoutedBrain {
             id: brain.id.clone(),
             name: brain.name.clone(),
             score,
-            reason: if brain.id == "everyday" && score == 1 {
+            reason: if is_cross_brain_pulse {
+                "selected by Kairos's default cross-brain pulse".to_owned()
+            } else if brain.id == "everyday" && score == 1 {
                 "default life-admin route; choose another brain if this is wrong".to_owned()
             } else {
                 "matched Kairos routing vocabulary".to_owned()
@@ -177,5 +197,30 @@ mod tests {
         let config = default_tharm_config().unwrap();
         let result = route_query(&config, "What should I do today?", None).unwrap();
         assert_eq!(result.brains.first().unwrap().id, "everyday");
+    }
+
+    #[test]
+    fn cross_brain_pulse_intentionally_uses_everyday_and_phd_without_ambiguity() {
+        let config = default_tharm_config().unwrap();
+        let result = route_query(&config, CROSS_BRAIN_PULSE_QUERY, None).unwrap();
+        let ids = result
+            .brains
+            .iter()
+            .map(|brain| brain.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["everyday", "phd"]);
+        assert!(!result.requires_choice);
+    }
+
+    #[test]
+    fn registered_routing_hints_support_new_brains_without_hard_coding() {
+        let mut config = default_tharm_config().unwrap();
+        let mut brain = config.brains[0].clone();
+        brain.id = "creative".to_owned();
+        brain.name = "Creative Brain".to_owned();
+        brain.routing_hints = vec!["songwriting".to_owned(), "music practice".to_owned()];
+        config.brains.push(brain);
+        let result = route_query(&config, "Help me plan my songwriting practice", None).unwrap();
+        assert_eq!(result.brains.first().unwrap().id, "creative");
     }
 }

@@ -7,23 +7,42 @@
 mod config;
 mod context;
 mod error;
+mod graph;
 mod policy;
 mod provider;
 mod routing;
+mod write;
 
 pub use config::{
-    BrainRecord, BrainRole, DEFAULT_CONTEXT_WINDOW_TOKENS, DEFAULT_LOCAL_MODEL,
-    DEFAULT_OLLAMA_ENDPOINT, EgressPolicy, FAST_ROUTER_MODEL, KairosConfig, LocalModelChoice,
-    LocalModelSettings, OPTIONAL_LOCAL_MODELS, ReadPolicy, WritePolicy, application_support_dir,
-    default_config_path, default_tharm_config, load_config, local_model_choices, write_config,
+    AppSettings, BrainRecord, BrainRole, CURRENT_CONFIG_VERSION, DEFAULT_CONTEXT_WINDOW_TOKENS,
+    DEFAULT_LOCAL_MODEL, DEFAULT_OLLAMA_ENDPOINT, EgressPolicy, FAST_ROUTER_MODEL,
+    InferenceSettings, KairosConfig, LocalModelChoice, LocalModelSettings, LocalSetupSettings,
+    OPTIONAL_LOCAL_MODELS, ProviderConfig, ProviderKind, ReadPolicy, SummonTarget, WritePolicy,
+    application_support_dir, default_brain_read_policy, default_config_path, default_tharm_config,
+    load_config, load_or_migrate_config, local_model_choices, migration_backup_path, write_config,
 };
 pub use context::{
     ContextPack, DeniedSource, SourceExcerpt, SourceRef, build_context, render_handoff,
 };
 pub use error::{CoreError, Result};
+pub use graph::{
+    DEFAULT_GRAPH_NODE_CAP, ExplicitReference, ExplicitReferences, GraphBrainSource,
+    GraphBuildOptions, GraphCluster, GraphClusterStatus, GraphDiagnostic, GraphDiagnosticKind,
+    GraphEdge, GraphEdgeKind, GraphIndex, GraphNode, GraphNodeKind, HARD_GRAPH_NODE_CAP,
+    KAIROS_NODE_ID, build_graph_index, extract_explicit_references, graph_freshness,
+};
 pub use policy::{
     AccessDisposition, AccessGrant, ContentDestination, canonicalize_allowed_file,
     enforce_content_egress, evaluate_access, preflight_retrieval_access, preflight_startup_access,
 };
-pub use provider::{BriefAnswer, OllamaProvider, OllamaStatus, ollama_status, synthesize_ollama};
-pub use routing::{RouteResult, RoutedBrain, route_query};
+pub use provider::{
+    BriefAnswer, ChatAnswer, ConversationTurn, InstalledModel, OllamaModelTest, OllamaProvider,
+    OllamaPullProgress, OllamaStatus, chat_with_anthropic_api, chat_with_claude_cli,
+    chat_with_codex_cli, chat_with_ollama, chat_with_openai_api, ollama_status, pull_ollama_model,
+    render_chat_prompt, stream_chat_with_ollama, synthesize_ollama, test_ollama_model,
+};
+pub use routing::{CROSS_BRAIN_PULSE_QUERY, RouteResult, RoutedBrain, route_query};
+pub use write::{
+    ConfirmedNoteWrite, NoteWriteConfirmation, NoteWriteKind, NoteWriteProposal, NoteWriteRequest,
+    WriteProposalOptions, WriteProposalStore, markdown_sha256,
+};

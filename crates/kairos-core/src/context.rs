@@ -287,6 +287,7 @@ fn global_router_policy() -> BrainRecord {
         root_path: PathBuf::from("/"),
         router_paths: Vec::new(),
         context_paths: Vec::new(),
+        routing_hints: Vec::new(),
         enabled: true,
         read_policy: ReadPolicy {
             explicit_only_patterns: vec!["90_Private/**".to_owned(), "**/90_Private/**".to_owned()],
@@ -306,6 +307,8 @@ fn global_router_policy() -> BrainRecord {
         },
         egress_policy: EgressPolicy::LocalOnly,
         write_policy: WritePolicy::ReadOnly,
+        write_directories: Vec::new(),
+        graph_enabled: false,
     }
 }
 
@@ -652,6 +655,9 @@ mod tests {
             version: 1,
             source_router_path: directory.join("router.md"),
             local_model: LocalModelSettings::default(),
+            app: crate::AppSettings::default(),
+            inference: crate::InferenceSettings::default(),
+            local_setup: crate::LocalSetupSettings::default(),
             brains: vec![BrainRecord {
                 id: "everyday".to_owned(),
                 name: "Everyday".to_owned(),
@@ -659,6 +665,7 @@ mod tests {
                 root_path: directory.clone(),
                 router_paths: vec!["00_System/AI Brain Manager.md".to_owned()],
                 context_paths: vec!["00_System/Current Context.md".to_owned()],
+                routing_hints: Vec::new(),
                 enabled: true,
                 read_policy: ReadPolicy {
                     startup_allow: vec!["00_System/**/*.md".to_owned()],
@@ -671,6 +678,8 @@ mod tests {
                 },
                 egress_policy: EgressPolicy::LocalOnly,
                 write_policy: WritePolicy::ReadOnly,
+                write_directories: Vec::new(),
+                graph_enabled: true,
             }],
         };
         (config, directory)

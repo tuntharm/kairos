@@ -1,5 +1,11 @@
-import { type CSSProperties, useEffect, useState } from "react";
+import {
+  type CSSProperties,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 import brandMark from "../../../design/assets/brand/kairos-mark-gradient.svg";
 import brandWordmark from "../../../design/assets/brand/kairos-wordmark-dark.svg";
@@ -27,6 +33,19 @@ type AppStatus = {
     setupMessage?: string;
     choices: Array<{ id: string; label: string; role: string }>;
   };
+  app?: {
+    summonShortcut?: string;
+    summonTarget?: "compact_chat" | "last_surface";
+    launchAtLogin?: boolean;
+    closeToHide?: boolean;
+  };
+  providers?: Array<{
+    id: string;
+    label: string;
+    enabled: boolean;
+    configured: boolean;
+    detail: string;
+  }>;
 };
 
 type Source = {
@@ -63,13 +82,136 @@ type LocalBrief = {
   context: ContextPack;
 };
 
-type BrainVisual = {
-  label: string;
-  color: string;
-  icon: string;
+type LocalSetupModel = {
+  id: string;
+  label?: string;
+  installed?: boolean;
+  downloadSize?: string;
+  memoryBand?: string;
+  recommendedContext?: string;
 };
 
+type LocalSetupStatus = {
+  ollamaInstalled?: boolean;
+  running?: boolean;
+  endpoint?: string;
+  detectedMemoryGb?: number;
+  availableDiskGb?: number;
+  selectedModelInstalled?: boolean;
+  setupMessage?: string;
+  models?: LocalSetupModel[];
+};
+
+type OllamaPullProgress = {
+  model: string;
+  status: string;
+  completed?: number;
+  total?: number;
+  percent?: number;
+};
+
+type BrainRecord = {
+  id: string;
+  name: string;
+  role: string;
+  rootPath?: string;
+  enabled?: boolean;
+  graphEnabled?: boolean;
+  egressPolicy?: string;
+  writePolicy?: string;
+  status?: "ready" | "offline" | "indexing" | "restricted";
+  noteCount?: number;
+};
+
+type BrainPolicyDraft = {
+  brainId: string;
+  egressPolicy: "local_only" | "cloud_allowed" | "redact_required";
+  writePolicy: "readonly" | "confirm_every_write" | "prohibited";
+  graphEnabled: boolean;
+};
+
+type GraphNode = {
+  id: string;
+  label: string;
+  brainId: string;
+  kind?: string;
+  x?: number;
+  y?: number;
+  protected?: boolean;
+};
+
+type GraphEdge = { source: string; target: string; kind?: string };
+
+type GraphSnapshot = {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  indexedAt?: string;
+  stale?: boolean;
+};
+
+type Attachment = {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+};
+
+type Citation = {
+  id: string;
+  brainId: string;
+  relativePath: string;
+  modifiedAt?: string;
+};
+
+type ChatMessage = {
+  id: string;
+  role: "user" | "assistant";
+  body: string;
+  createdAt: string;
+  routes?: Array<{ id: string; name: string }>;
+  citations?: Citation[];
+  provider?: string;
+  notice?: boolean;
+};
+
+type StreamingAssistant = {
+  turnId: string;
+  body: string;
+  createdAt: string;
+};
+
+type ChatPreview = {
+  previewToken?: string;
+  message: string;
+  providerId: string;
+  providerLabel: string;
+  routes: Array<{ id: string; name: string }>;
+  citations: Citation[];
+  attachmentNames: string[];
+  outgoingSummary: string;
+};
+
+type NoteWriteProposal = {
+  id: string;
+  nonce: string;
+  brainId: string;
+  relativePath: string;
+  kind: "create" | "edit";
+  beforeSha256?: string;
+  afterSha256: string;
+  diff: string;
+  expiresAt: string;
+};
+
+type ProviderId = "ollama" | "openai" | "anthropic" | "codex-cli" | "claude-cli";
+type ViewId = "chat" | "next" | "map" | "settings";
+type MemoryBudget = "auto" | "custom" | 16 | 24 | 32 | 48 | 64 | 96 | 192;
+
+type BrainVisual = { label: string; color: string; icon: string };
+
 const briefQuestion = "What should I do next, and why?";
+const ollamaInstallUrl = "https://ollama.com/download/mac";
+const chatStorageKey = "kairos:chat-history:v1";
 
 const browserPreviewStatus: AppStatus = {
   configPath: "Browser preview",
@@ -84,25 +226,131 @@ const browserPreviewStatus: AppStatus = {
     installedModels: ["qwen3.6:35b-mlx", "qwen3:8b"],
     choices: [
       { id: "qwen3.6:35b-mlx", label: "Qwen 3.6 35B MLX", role: "Default local model" },
-      { id: "qwen3:8b", label: "Qwen 3 8B", role: "Fast router / manual fallback" },
+      { id: "qwen3:8b", label: "Qwen 3 8B", role: "Fast router" },
       { id: "gpt-oss:20b", label: "GPT-OSS 20B", role: "Optional alternative" },
       { id: "glm-4.7-flash", label: "GLM 4.7 Flash", role: "Optional alternative" },
     ],
   },
 };
 
-function hasNativeBridge() {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
+const browserPreviewSetup: LocalSetupStatus = {
+  ollamaInstalled: true,
+  running: true,
+  endpoint: "http://localhost:11434",
+  detectedMemoryGb: 48,
+  availableDiskGb: 532,
+  selectedModelInstalled: true,
+};
+
+const initialBrains: BrainRecord[] = [
+  {
+    id: "everyday",
+    name: "Everyday Life Brain",
+    role: "Life planning, people, routines, and projects",
+    rootPath: "~/everyday-life-brain",
+    enabled: true,
+    graphEnabled: true,
+    egressPolicy: "local_only",
+    writePolicy: "confirm_every_write",
+    status: "ready",
+  },
+  {
+    id: "phd",
+    name: "PhD / Research Brain",
+    role: "Research strategy and authoritative PhD context",
+    rootPath: "~/Library/CloudStorage/…/PhD - Surrogate Modelling",
+    enabled: true,
+    graphEnabled: true,
+    egressPolicy: "local_only",
+    writePolicy: "readonly",
+    status: "ready",
+  },
+  {
+    id: "datter",
+    name: "Datter AI",
+    role: "Data usefulness project memory",
+    rootPath: "~/dev/datter",
+    enabled: false,
+    graphEnabled: false,
+    egressPolicy: "local_only",
+    writePolicy: "readonly",
+    status: "offline",
+  },
+];
+
+const fallbackGraph: GraphSnapshot = {
+  nodes: [
+    { id: "kairos", label: "Kairos", brainId: "kairos", kind: "manager", x: 50, y: 49 },
+    { id: "everyday-home", label: "Home", brainId: "everyday", kind: "map", x: 25, y: 27 },
+    { id: "everyday-routines", label: "Routines", brainId: "everyday", kind: "note", x: 18, y: 66 },
+    { id: "everyday-projects", label: "Life projects", brainId: "everyday", kind: "map", x: 35, y: 80 },
+    { id: "phd-context", label: "PhD context", brainId: "phd", kind: "map", x: 76, y: 27 },
+    { id: "phd-claims", label: "Research claims", brainId: "phd", kind: "note", x: 85, y: 64 },
+    { id: "bridge", label: "PhD bridge", brainId: "phd", kind: "bridge", x: 64, y: 80 },
+  ],
+  edges: [
+    { source: "kairos", target: "everyday-home" },
+    { source: "kairos", target: "everyday-routines" },
+    { source: "kairos", target: "phd-context" },
+    { source: "kairos", target: "phd-claims" },
+    { source: "everyday-home", target: "everyday-projects" },
+    { source: "phd-context", target: "phd-claims" },
+    { source: "phd-context", target: "bridge" },
+  ],
+};
+
+const modelCatalog: Record<string, { label: string; role: string; downloadSize: string; memoryBand: string; context: string }> = {
+  "qwen3.6:35b-mlx": {
+    label: "Qwen 3.6 35B MLX",
+    role: "Starter default",
+    downloadSize: "~21 GB",
+    memoryBand: "Power · 48 GB+ recommended",
+    context: "32K context target",
+  },
+  "qwen3:8b": {
+    label: "Qwen 3 8B",
+    role: "Fast router",
+    downloadSize: "~5.2 GB",
+    memoryBand: "Light · 16 GB+",
+    context: "32K context target",
+  },
+  "gpt-oss:20b": {
+    label: "GPT-OSS 20B",
+    role: "Optional alternative",
+    downloadSize: "Varies by build",
+    memoryBand: "Balanced · 32 GB+",
+    context: "32K context target",
+  },
+  "glm-4.7-flash": {
+    label: "GLM 4.7 Flash",
+    role: "Optional alternative",
+    downloadSize: "~19 GB",
+    memoryBand: "Balanced · 32 GB+",
+    context: "32K context target",
+  },
+};
+
+const providers: Array<{ id: ProviderId; label: string; detail: string; external: boolean }> = [
+  { id: "ollama", label: "Ollama · local", detail: "Your Mac · no cloud egress", external: false },
+  { id: "openai", label: "OpenAI API", detail: "Cloud · preview each turn", external: true },
+  { id: "anthropic", label: "Anthropic API", detail: "Cloud · preview each turn", external: true },
+  { id: "codex-cli", label: "Codex CLI", detail: "Explicit, ephemeral handoff", external: true },
+  { id: "claude-cli", label: "Claude Code CLI", detail: "Explicit, ephemeral handoff", external: true },
+];
 
 const brainVisuals: Record<string, BrainVisual> = {
   everyday: { label: "Everyday", color: "#4C9FFF", icon: everydayCitation },
   phd: { label: "PhD", color: "#9E7BFF", icon: phdCitation },
   datter: { label: "Datter", color: "#49D7D2", icon: datterCitation },
   "border-fiber": { label: "Border Fiber", color: "#FFB85C", icon: borderFiberCitation },
+  kairos: { label: "Kairos", color: "#FFC766", icon: fileCitation },
 };
 
 const fileVisual: BrainVisual = { label: "File", color: "#A5B4CC", icon: fileCitation };
+
+function hasNativeBridge() {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
 
 function brainVisual(brainId: string): BrainVisual {
   return brainVisuals[brainId] ?? fileVisual;
@@ -113,17 +361,137 @@ function compactPath(path: string) {
   return pieces.length > 2 ? pieces.slice(-2).join("/") : path;
 }
 
-function CitationChip({ source }: { source: Source["source"] }) {
-  const visual = brainVisual(source.brainId);
+function shortDate(iso?: string) {
+  if (!iso) return undefined;
+  const parsed = new Date(iso);
+  return Number.isNaN(parsed.valueOf()) ? undefined : parsed.toLocaleDateString();
+}
+
+function makeId(prefix: string) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function sourceCitation(source: Source["source"]): Citation {
+  return {
+    id: source.id,
+    brainId: source.brainId,
+    relativePath: source.relativePath,
+    modifiedAt: source.modifiedAt,
+  };
+}
+
+function defaultChatMessages(): ChatMessage[] {
+  return [{
+    id: "welcome",
+    role: "assistant",
+    body: "I’m Kairos. Ask what matters now, or use What Next for a cross-brain pulse. I route before I read.",
+    createdAt: new Date().toISOString(),
+    routes: [{ id: "everyday", name: "Everyday Life Brain" }],
+    notice: true,
+  }];
+}
+
+function readChatHistory(): ChatMessage[] {
+  try {
+    const saved = window.localStorage.getItem(chatStorageKey);
+    if (!saved) return defaultChatMessages();
+    const parsed = JSON.parse(saved);
+    return Array.isArray(parsed) && parsed.length > 0 ? parsed.slice(-60) : defaultChatMessages();
+  } catch {
+    return defaultChatMessages();
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" ? value as Record<string, unknown> : null;
+}
+
+function normalizeBrains(value: unknown): BrainRecord[] | null {
+  const candidate = Array.isArray(value)
+    ? value
+    : Array.isArray(asRecord(value)?.brains)
+      ? asRecord(value)?.brains as unknown[]
+      : null;
+  if (!candidate) return null;
+  const brains = candidate.flatMap((item): BrainRecord[] => {
+    const record = asRecord(item);
+    if (!record || typeof record.id !== "string" || typeof record.name !== "string") return [];
+    return [{
+      id: record.id,
+      name: record.name,
+      role: typeof record.role === "string" ? record.role : "Registered brain",
+      rootPath: typeof record.rootPath === "string" ? record.rootPath : undefined,
+      enabled: typeof record.enabled === "boolean" ? record.enabled : true,
+      graphEnabled: typeof record.graphEnabled === "boolean" ? record.graphEnabled : true,
+      egressPolicy: typeof record.egressPolicy === "string" ? record.egressPolicy : "local_only",
+      writePolicy: typeof record.writePolicy === "string" ? record.writePolicy : "readonly",
+      status: ["ready", "offline", "indexing", "restricted"].includes(String(record.status))
+        ? record.status as BrainRecord["status"]
+        : "ready",
+      noteCount: typeof record.noteCount === "number" ? record.noteCount : undefined,
+    }];
+  });
+  return brains.length > 0 ? brains : null;
+}
+
+function canConfirmWrites(brain: BrainRecord) {
+  return brain.writePolicy === "confirm_every_write" || brain.writePolicy === "propose_confirm";
+}
+
+function policyDraftFor(brain: BrainRecord): BrainPolicyDraft {
+  return {
+    brainId: brain.id,
+    egressPolicy: brain.egressPolicy === "cloud_allowed" || brain.egressPolicy === "redact_required"
+      ? brain.egressPolicy
+      : "local_only",
+    writePolicy: brain.writePolicy === "confirm_every_write" || brain.writePolicy === "prohibited"
+      ? brain.writePolicy
+      : "readonly",
+    graphEnabled: brain.graphEnabled !== false,
+  };
+}
+
+function normalizeGraph(value: unknown): GraphSnapshot | null {
+  const record = asRecord(value);
+  if (!record || !Array.isArray(record.nodes) || !Array.isArray(record.edges)) return null;
+  const nodes = record.nodes.flatMap((item, index): GraphNode[] => {
+    const node = asRecord(item);
+    if (!node || typeof node.id !== "string") return [];
+    const position = fallbackGraph.nodes[index % fallbackGraph.nodes.length];
+    return [{
+      id: node.id,
+      label: typeof node.label === "string" ? node.label : node.id,
+      brainId: typeof node.brainId === "string" ? node.brainId : "kairos",
+      kind: typeof node.kind === "string" ? node.kind : "note",
+      x: typeof node.x === "number" ? node.x : position.x,
+      y: typeof node.y === "number" ? node.y : position.y,
+      protected: Boolean(node.protected),
+    }];
+  });
+  const edges = record.edges.flatMap((item): GraphEdge[] => {
+    const edge = asRecord(item);
+    if (!edge || typeof edge.source !== "string" || typeof edge.target !== "string") return [];
+    return [{ source: edge.source, target: edge.target, kind: typeof edge.kind === "string" ? edge.kind : undefined }];
+  });
+  return nodes.length > 0 ? {
+    nodes,
+    edges,
+    indexedAt: typeof record.indexedAt === "string" ? record.indexedAt : undefined,
+    stale: Boolean(record.stale),
+  } : null;
+}
+
+function CitationChip({ citation }: { citation: Citation }) {
+  const visual = brainVisual(citation.brainId);
   return (
     <span
       className="citation-chip"
       style={{ "--chip-color": visual.color } as CSSProperties}
-      title={source.relativePath}
+      title={citation.relativePath}
     >
       <img src={visual.icon} alt="" aria-hidden="true" />
       <span>{visual.label}</span>
-      <span className="citation-chip__detail">{compactPath(source.relativePath)}</span>
+      <span className="citation-chip__detail">{compactPath(citation.relativePath)}</span>
     </span>
   );
 }
@@ -143,50 +511,277 @@ function KairosLoader() {
   );
 }
 
+function StatusPill({ tone = "neutral", children }: { tone?: "neutral" | "success" | "warning" | "danger" | "local"; children: string }) {
+  return <span className={`status-pill status-pill--${tone}`}>{children}</span>;
+}
+
+function RouteChips({ routes }: { routes?: Array<{ id: string; name: string }> }) {
+  if (!routes?.length) return null;
+  return (
+    <div className="route-chip-row" aria-label="Routed brains">
+      {routes.map((route) => {
+        const visual = brainVisual(route.id);
+        return (
+          <span className="route-chip" key={route.id} style={{ "--route-color": visual.color } as CSSProperties}>
+            <span className="route-chip__dot" />
+            {route.name}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 export default function App() {
   const nativeRuntime = hasNativeBridge();
-  const [status, setStatus] = useState<AppStatus | null>(() => (
-    nativeRuntime ? null : browserPreviewStatus
-  ));
-  const [pack, setPack] = useState<ContextPack | null>(null);
-  const [answer, setAnswer] = useState<BriefAnswer | null>(null);
+  const [status, setStatus] = useState<AppStatus | null>(() => nativeRuntime ? null : browserPreviewStatus);
+  const [localSetup, setLocalSetup] = useState<LocalSetupStatus | null>(() => nativeRuntime ? null : browserPreviewSetup);
+  const [view, setView] = useState<ViewId>("chat");
+  const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [capabilityNotice, setCapabilityNotice] = useState<string | null>(null);
+  const [briefResult, setBriefResult] = useState<LocalBrief | null>(null);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(readChatHistory);
+  const [streamingAssistant, setStreamingAssistant] = useState<StreamingAssistant | null>(null);
+  const [composer, setComposer] = useState("");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
+  const [providerId, setProviderId] = useState<ProviderId>("ollama");
+  const [brainOverride, setBrainOverride] = useState("auto");
+  const [chatPreview, setChatPreview] = useState<ChatPreview | null>(null);
+  const [chatSessionId, setChatSessionId] = useState<string | null>(null);
+  const [providerModel, setProviderModel] = useState("");
+  const [providerApiKey, setProviderApiKey] = useState("");
+  const [providerSettingsBusy, setProviderSettingsBusy] = useState(false);
+  const [providerSettingsFeedback, setProviderSettingsFeedback] = useState<string | null>(null);
+  const [memoryBudget, setMemoryBudget] = useState<MemoryBudget>("auto");
+  const [customMemoryBudget, setCustomMemoryBudget] = useState("48");
+  const [modelOperation, setModelOperation] = useState<{ kind: "pull" | "test"; model: string } | null>(null);
+  const [pullProgress, setPullProgress] = useState<OllamaPullProgress | null>(null);
+  const [failedPullModel, setFailedPullModel] = useState<string | null>(null);
+  const [setupFeedback, setSetupFeedback] = useState<string | null>(null);
+  const [brains, setBrains] = useState<BrainRecord[]>(initialBrains);
+  const [policyEditor, setPolicyEditor] = useState<BrainPolicyDraft | null>(null);
+  const [policyBusy, setPolicyBusy] = useState(false);
+  const [policyFeedback, setPolicyFeedback] = useState<string | null>(null);
+  const [graph, setGraph] = useState<GraphSnapshot>(fallbackGraph);
+  const [graphBusy, setGraphBusy] = useState(false);
+  const [graphFilter, setGraphFilter] = useState("all");
+  const [graphSearch, setGraphSearch] = useState("");
+  const [selectedGraphNode, setSelectedGraphNode] = useState<string | null>(null);
+  const [addBrain, setAddBrain] = useState<{
+    selectionToken: string;
+    displayPath?: string;
+    name: string;
+    role: string;
+    routingHints: string;
+    egressPolicy: string;
+    writePolicy: string;
+    graphEnabled: boolean;
+    noteCount?: number;
+    routerCandidates: string[];
+    contextCandidates: string[];
+  } | null>(null);
+  const [preferences, setPreferences] = useState({
+    shortcut: "Option+Space",
+    summonTarget: "compact" as "compact" | "last-page",
+    launchAtLogin: false,
+    closeToHide: true,
+    contextWindowTokens: 32_768,
+  });
+  const [preferencesFeedback, setPreferencesFeedback] = useState<string | null>(null);
+  const [writeDraft, setWriteDraft] = useState({ brainId: "everyday", kind: "create" as "create" | "edit", relativePath: "01_Daily/Kairos Capture.md", markdown: "" });
+  const [writeProposal, setWriteProposal] = useState<NoteWriteProposal | null>(null);
+  const [writeBusy, setWriteBusy] = useState(false);
+  const [writeFeedback, setWriteFeedback] = useState<string | null>(null);
 
-  const modelReady = Boolean(status?.model.running && status.model.selectedModelInstalled);
+  const activeProvider = providers.find((provider) => provider.id === providerId) ?? providers[0];
   const activeModel = status?.model.resolvedModel ?? status?.model.selectedModel ?? "Checking Ollama";
-  const routeIcon = error
-    ? routeError
-    : pack
-      ? pack.route.brains.length > 1
-        ? routeMulti
-        : routeOne
-      : routeIdle;
+  const ollamaRunning = localSetup?.running ?? status?.model.running ?? false;
+  const selectedModelInstalled = localSetup?.selectedModelInstalled ?? status?.model.selectedModelInstalled ?? false;
+  const detectedMemoryGb = localSetup?.detectedMemoryGb ?? (nativeRuntime ? 0 : 48);
+  const availableDiskGb = localSetup?.availableDiskGb ?? (nativeRuntime ? 0 : 532);
+  const effectiveMemoryBudget = memoryBudget === "auto"
+    ? detectedMemoryGb || 48
+    : memoryBudget === "custom"
+      ? Math.max(1, Number(customMemoryBudget) || detectedMemoryGb)
+      : memoryBudget;
+  const modelReady = Boolean(status?.initialized && ollamaRunning && selectedModelInstalled);
+  const selectedBrain = brains.find((brain) => brain.id === brainOverride);
+  const writableBrains = brains.filter(canConfirmWrites);
+  const graphNode = graph.nodes.find((node) => node.id === selectedGraphNode);
+
+  const routeIcon = error ? routeError : briefResult
+    ? briefResult.context.route.brains.length > 1 ? routeMulti : routeOne
+    : routeIdle;
+
   const routeLabel = busy
-    ? "Routing local evidence"
+    ? "Routing"
     : error
       ? "Needs attention"
-      : pack
-        ? pack.route.brains.length > 1
-          ? "Composed route"
-          : "Authoritative route"
-        : "Ready to route";
+      : "Ready to route";
+
+  const callFeature = async <T,>(command: string, args?: Record<string, unknown>, unavailableMessage?: string): Promise<T | null> => {
+    if (!nativeRuntime) {
+      setCapabilityNotice("This is a browser preview. Open Kairos for local vault and model actions.");
+      return null;
+    }
+    try {
+      return await invoke<T>(command, args);
+    } catch (reason) {
+      setCapabilityNotice(
+        reason instanceof Error && reason.message
+          ? reason.message
+          : unavailableMessage ?? "This control needs the matching native Kairos update.",
+      );
+      return null;
+    }
+  };
 
   const refreshStatus = async () => {
     if (!nativeRuntime) {
       setStatus(browserPreviewStatus);
+      setLocalSetup(browserPreviewSetup);
       return;
     }
     try {
-      setStatus(await invoke<AppStatus>("app_status"));
+      const nextStatus = await invoke<AppStatus>("app_status");
+      setStatus(nextStatus);
+      if (nextStatus.app) {
+        setPreferences((current) => ({
+          ...current,
+          shortcut: nextStatus.app?.summonShortcut?.replace("Alt", "Option") ?? current.shortcut,
+          summonTarget: nextStatus.app?.summonTarget === "last_surface" ? "last-page" : "compact",
+          launchAtLogin: nextStatus.app?.launchAtLogin ?? current.launchAtLogin,
+          closeToHide: nextStatus.app?.closeToHide ?? current.closeToHide,
+          contextWindowTokens: nextStatus.model.contextWindowTokens ?? current.contextWindowTokens,
+        }));
+      }
+      setError(null);
     } catch (reason) {
       setError(String(reason));
     }
+    try {
+      const nextSetup = await invoke<LocalSetupStatus>("local_setup_status");
+      setLocalSetup(nextSetup);
+    } catch {
+      // Older native builds keep the setup view informative from app_status.
+    }
+  };
+
+  const refreshBrains = async () => {
+    const result = await callFeature<unknown>(
+      "list_brains",
+      undefined,
+      "Brain management arrives with the next native Kairos update.",
+    );
+    const nextBrains = normalizeBrains(result);
+    if (nextBrains) setBrains(nextBrains);
+  };
+
+  const refreshGraph = async () => {
+    setGraphBusy(true);
+    const result = await callFeature<unknown>(
+      "graph_snapshot",
+      undefined,
+      "The local metadata graph is not available in this Kairos build yet.",
+    );
+    const nextGraph = normalizeGraph(result);
+    if (nextGraph) setGraph(nextGraph);
+    setGraphBusy(false);
   };
 
   useEffect(() => {
     void refreshStatus();
   }, []);
+
+  useEffect(() => {
+    if (!nativeRuntime) return;
+    let dispose: (() => void) | undefined;
+    void listen<"compact_chat" | "last_surface">("kairos://summon", (event) => {
+      if (event.payload === "last_surface") {
+        setExpanded(true);
+      } else {
+        setView("chat");
+        setExpanded(false);
+      }
+    }).then((unlisten) => {
+      dispose = unlisten;
+    });
+    return () => dispose?.();
+  }, [nativeRuntime]);
+
+  useEffect(() => {
+    if (!nativeRuntime) return;
+    let dispose: (() => void) | undefined;
+    void listen<unknown>("kairos-chat-delta", (event) => {
+      const payload = asRecord(event.payload);
+      const turnId = typeof payload?.turnId === "string" ? payload.turnId : undefined;
+      const delta = typeof payload?.delta === "string" ? payload.delta : undefined;
+      if (!turnId || !delta) return;
+      setStreamingAssistant((current) => current?.turnId === turnId
+        ? { ...current, body: `${current.body}${delta}` }
+        : current);
+    }).then((unlisten) => {
+      dispose = unlisten;
+    });
+    return () => dispose?.();
+  }, [nativeRuntime]);
+
+  useEffect(() => {
+    if (!nativeRuntime) return;
+    let dispose: (() => void) | undefined;
+    void listen<unknown>("ollama-pull-progress", (event) => {
+      const payload = asRecord(event.payload);
+      const model = typeof payload?.model === "string" ? payload.model : undefined;
+      if (!model) return;
+      const status = typeof payload?.status === "string" ? payload.status : "Downloading model…";
+      const completed = typeof payload?.completed === "number" ? payload.completed : undefined;
+      const total = typeof payload?.total === "number" ? payload.total : undefined;
+      const percent = typeof payload?.percent === "number"
+        ? Math.max(0, Math.min(100, payload.percent))
+        : completed !== undefined && total && total > 0
+          ? Math.max(0, Math.min(100, (completed / total) * 100))
+          : undefined;
+      const normalized = status.toLowerCase();
+      const failed = Boolean(payload?.error) || ["failed", "error"].some((word) => normalized.includes(word));
+      const finished = failed || Boolean(payload?.done) || ["complete", "success", "cancelled", "canceled"].some((word) => normalized.includes(word));
+      if (finished) {
+        setPullProgress(null);
+        setModelOperation((current) => current?.kind === "pull" && current.model === model ? null : current);
+        if (failed) {
+          setFailedPullModel(model);
+          setSetupFeedback(`${model} did not finish downloading. Check Ollama, then retry.`);
+        }
+        return;
+      }
+      setPullProgress({ model, status, completed, total, percent });
+    }).then((unlisten) => {
+      dispose = unlisten;
+    });
+    return () => dispose?.();
+  }, [nativeRuntime]);
+
+  useEffect(() => {
+    if (!nativeRuntime) return;
+    void invoke("set_surface_mode", { expanded }).catch(() => {
+      // Older native builds retain their fixed compact window size.
+    });
+  }, [expanded, nativeRuntime]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(chatStorageKey, JSON.stringify(chatMessages.slice(-60)));
+    } catch {
+      // Local chat persistence is best effort; the chat remains usable for this session.
+    }
+  }, [chatMessages]);
+
+  useEffect(() => {
+    if (view === "map") void refreshGraph();
+    if (view === "settings") void refreshBrains();
+  }, [view]);
 
   const initialize = async () => {
     if (!nativeRuntime) return;
@@ -194,29 +789,7 @@ export default function App() {
     setError(null);
     try {
       setStatus(await invoke<AppStatus>("initialize_tharm_profile"));
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const brief = async () => {
-    if (!nativeRuntime) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const current = await invoke<AppStatus>("app_status");
-      setStatus(current);
-      if (!current.model.running || !current.model.selectedModelInstalled) {
-        setAnswer(null);
-        setPack(null);
-        setError(current.model.setupMessage ?? "The selected local model is not ready yet.");
-        return;
-      }
-      const result = await invoke<LocalBrief>("brief_with_ollama");
-      setAnswer(result.answer);
-      setPack(result.context);
+      await refreshStatus();
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -225,13 +798,16 @@ export default function App() {
   };
 
   const selectModel = async (model: string) => {
-    if (!nativeRuntime) return;
+    if (!nativeRuntime) {
+      setCapabilityNotice("This is a browser preview. Choose and save local models in the Kairos desktop app.");
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
       setStatus(await invoke<AppStatus>("set_selected_model", { model }));
-      setAnswer(null);
-      setPack(null);
+      setBriefResult(null);
+      await refreshStatus();
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -239,154 +815,950 @@ export default function App() {
     }
   };
 
+  const runPulse = async () => {
+    if (activeProvider.external) {
+      setView("chat");
+      setExpanded(true);
+      setComposer(briefQuestion);
+      await previewExternalTurn(briefQuestion);
+      return;
+    }
+    if (!nativeRuntime) {
+      setCapabilityNotice("What Next uses the local vault only in the Kairos desktop app.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const current = await invoke<AppStatus>("app_status");
+      setStatus(current);
+      if (!current.model.running || !current.model.selectedModelInstalled) {
+        setBriefResult(null);
+        setError(current.model.setupMessage ?? "The selected local model is not ready yet.");
+        return;
+      }
+      setBriefResult(await invoke<LocalBrief>("brief_with_ollama"));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const previewExternalTurn = async (message: string) => {
+    const history = chatMessages
+      .filter((chat) => chat.role === "user" || chat.role === "assistant")
+      .slice(-8)
+      .map((chat) => ({ role: chat.role, content: chat.body }));
+    const result = await callFeature<unknown>(
+      "chat_preview",
+      {
+        message,
+        brainOverride: brainOverride === "auto" ? undefined : brainOverride,
+        providerId,
+        history,
+        attachmentIds: attachments.map((attachment) => attachment.id),
+      },
+      "External-provider preview is not available in this native build yet. Nothing was sent.",
+    );
+    const raw = asRecord(result);
+    const route = asRecord(raw?.route);
+    const routeBrains = Array.isArray(route?.brains) ? route?.brains : [];
+    const routes = routeBrains.flatMap((item): Array<{ id: string; name: string }> => {
+      const itemRecord = asRecord(item);
+      return itemRecord && typeof itemRecord.id === "string" && typeof itemRecord.name === "string"
+        ? [{ id: itemRecord.id, name: itemRecord.name }]
+        : [];
+    });
+    const context = asRecord(raw?.context);
+    const sourceItems = Array.isArray(context?.sources) ? context?.sources : [];
+    const citations = sourceItems.flatMap((item): Citation[] => {
+      const itemRecord = asRecord(item);
+      const source = asRecord(itemRecord?.source);
+      return source && typeof source.id === "string" && typeof source.brainId === "string" && typeof source.relativePath === "string"
+        ? [sourceCitation({
+          id: source.id,
+          brainId: source.brainId,
+          relativePath: source.relativePath,
+          modifiedAt: typeof source.modifiedAt === "string" ? source.modifiedAt : undefined,
+        })]
+        : [];
+    });
+    setChatPreview({
+      previewToken: typeof raw?.previewToken === "string" ? raw.previewToken : undefined,
+      message,
+      providerId,
+      providerLabel: activeProvider.label,
+      routes: routes.length ? routes : selectedBrain ? [{ id: selectedBrain.id, name: selectedBrain.name }] : [],
+      citations: citations.slice(0, 3),
+      attachmentNames: Array.isArray(raw?.attachmentNames)
+        ? raw.attachmentNames.filter((name): name is string => typeof name === "string")
+        : attachments.map((attachment) => attachment.name),
+      outgoingSummary: typeof raw?.outgoingSummary === "string"
+        ? raw.outgoingSummary
+        : message,
+    });
+  };
+
+  const messageFromResult = (result: unknown, fallback: string): ChatMessage => {
+    const raw = asRecord(result);
+    const resultContext = asRecord(raw?.context);
+    const resultRoute = asRecord(resultContext?.route);
+    const routeItems = Array.isArray(resultRoute?.brains) ? resultRoute?.brains : [];
+    const routes = routeItems.flatMap((item): Array<{ id: string; name: string }> => {
+      const route = asRecord(item);
+      return route && typeof route.id === "string" && typeof route.name === "string"
+        ? [{ id: route.id, name: route.name }]
+        : [];
+    });
+    const sources = Array.isArray(resultContext?.sources) ? resultContext?.sources : [];
+    const citations = sources.flatMap((item): Citation[] => {
+      const sourceRecord = asRecord(asRecord(item)?.source);
+      return sourceRecord && typeof sourceRecord.id === "string" && typeof sourceRecord.brainId === "string" && typeof sourceRecord.relativePath === "string"
+        ? [sourceCitation({
+          id: sourceRecord.id,
+          brainId: sourceRecord.brainId,
+          relativePath: sourceRecord.relativePath,
+          modifiedAt: typeof sourceRecord.modifiedAt === "string" ? sourceRecord.modifiedAt : undefined,
+        })]
+        : [];
+    });
+    const answer = raw?.answer;
+    const answerRecord = asRecord(answer);
+    const body = typeof answer === "string"
+      ? answer
+      : typeof raw?.message === "string"
+        ? raw.message
+        : answerRecord && typeof answerRecord.action === "string"
+          ? `${answerRecord.action}\n\n${typeof answerRecord.why === "string" ? answerRecord.why : ""}`.trim()
+          : fallback;
+    return {
+      id: makeId("assistant"),
+      role: "assistant",
+      body,
+      createdAt: new Date().toISOString(),
+      routes,
+      citations: citations.slice(0, 3),
+      provider: activeProvider.label,
+      notice: body === fallback,
+    };
+  };
+
+  const submitChat = async (confirmedExternal = false) => {
+    const message = chatPreview?.message ?? composer.trim();
+    if (!message || busy) return;
+    if (activeProvider.external && !confirmedExternal) {
+      await previewExternalTurn(message);
+      return;
+    }
+    const turnId = activeProvider.id === "ollama" ? makeId("turn") : undefined;
+    setBusy(true);
+    setError(null);
+    if (turnId) {
+      setStreamingAssistant({ turnId, body: "", createdAt: new Date().toISOString() });
+    }
+    const userMessage: ChatMessage = {
+      id: makeId("user"),
+      role: "user",
+      body: message,
+      createdAt: new Date().toISOString(),
+      routes: selectedBrain ? [{ id: selectedBrain.id, name: selectedBrain.name }] : undefined,
+    };
+    setChatMessages((messages) => [...messages, userMessage]);
+    setComposer("");
+    setChatPreview(null);
+    try {
+      const history = chatMessages
+        .filter((chat) => chat.role === "user" || chat.role === "assistant")
+        .slice(-8)
+        .map((chat) => ({ role: chat.role, content: chat.body }));
+      const result = await callFeature<unknown>(
+      "chat_with_provider",
+      {
+          request: {
+            message,
+            brainOverride: brainOverride === "auto" ? undefined : brainOverride,
+            providerId,
+            confirmedExternal,
+            previewToken: chatPreview?.previewToken,
+            history,
+            sessionId: chatSessionId,
+            attachmentIds: attachments.map((attachment) => attachment.id),
+            turnId,
+          },
+        },
+        "Chat generation is not available in this native build yet. Your text has not been sent to another provider.",
+      );
+      const fallback = activeProvider.external
+        ? "This cloud handoff was not sent because the native confirmation bridge is not available yet."
+        : "Local chat is waiting for the native chat engine. Try What Next for the current local brief.";
+      const resultRecord = asRecord(result);
+      if (typeof resultRecord?.sessionId === "string") {
+        setChatSessionId(resultRecord.sessionId);
+        setAttachments([]);
+      }
+      setChatMessages((messages) => [...messages, messageFromResult(result, fallback)]);
+    } finally {
+      if (turnId) {
+        setStreamingAssistant((current) => current?.turnId === turnId ? null : current);
+      }
+      setBusy(false);
+    }
+  };
+
+  const pickTemporaryAttachments = async () => {
+    const selected = await callFeature<Attachment[]>(
+      "pick_temp_attachments",
+      undefined,
+      "Temporary attachment selection needs the native Kairos app.",
+    );
+    if (!selected?.length) return;
+    setAttachments((current) => [...current, ...selected].slice(0, 5));
+    setAttachmentNotice("Attachments are extracted locally, sent only with this turn, then removed from Kairos.");
+  };
+
+  const discardAttachment = (attachmentId: string) => {
+    setAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));
+    if (nativeRuntime) void invoke("discard_temp_attachment", { attachmentId }).catch(() => undefined);
+  };
+
+  const handlePullModel = async (model: string) => {
+    setModelOperation({ kind: "pull", model });
+    setPullProgress({ model, status: "Starting download…" });
+    setFailedPullModel(null);
+    setSetupFeedback(null);
+    try {
+      const result = await callFeature<LocalSetupStatus>(
+        "pull_ollama_model",
+        { model },
+        "In-app model download is not available in this native build yet. You can install it with Ollama, then refresh Kairos.",
+      );
+      if (result) {
+        setLocalSetup(result);
+        setSetupFeedback(`${model} is ready to select.`);
+        await refreshStatus();
+      } else if (nativeRuntime) {
+        setFailedPullModel(model);
+        setSetupFeedback(`${model} did not finish downloading. Check Ollama, then retry.`);
+      }
+    } finally {
+      setPullProgress(null);
+      setModelOperation(null);
+    }
+  };
+
+  const cancelPullModel = async (model: string) => {
+    await callFeature<unknown>(
+      "cancel_ollama_pull",
+      { model },
+      "Kairos could not cancel this download. Ollama may still be working in the background.",
+    );
+    setPullProgress(null);
+    setModelOperation(null);
+    setSetupFeedback(`${model} download cancelled. You can retry whenever you are ready.`);
+  };
+
+  const handleTestModel = async (model: string) => {
+    setModelOperation({ kind: "test", model });
+    setSetupFeedback(null);
+    const result = await callFeature<unknown>(
+      "test_ollama_model",
+      { model },
+      "The model test is not available in this native build yet.",
+    );
+    const raw = asRecord(result);
+    if (result) {
+      setSetupFeedback(typeof raw?.message === "string" ? raw.message : `${model} passed a local availability check.`);
+    }
+    setModelOperation(null);
+  };
+
+  const openOllamaInstall = async () => {
+    if (!nativeRuntime) {
+      window.open(ollamaInstallUrl, "_blank", "noopener,noreferrer");
+      return;
+    }
+    try {
+      await invoke("open_ollama_install_page");
+    } catch {
+      window.open(ollamaInstallUrl, "_blank", "noopener,noreferrer");
+      setCapabilityNotice("Opened the official Ollama download page in your browser.");
+    }
+  };
+
+  const pickBrainFolder = async () => {
+    const picked = await callFeature<unknown>(
+      "pick_brain_folder",
+      undefined,
+      "Folder selection needs the native Kairos app. No filesystem access is exposed to this view.",
+    );
+    const raw = asRecord(picked);
+    if (!raw || typeof raw.selectionToken !== "string") return;
+    const inspection = await callFeature<unknown>(
+      "inspect_brain_folder",
+      { selectionToken: raw.selectionToken },
+      "Folder inspection is not available in this native build yet.",
+    );
+    const details = asRecord(inspection);
+    setAddBrain({
+      selectionToken: raw.selectionToken,
+      displayPath: typeof raw.displayPath === "string" ? raw.displayPath : undefined,
+      name: typeof details?.suggestedName === "string" ? details.suggestedName : "New Obsidian brain",
+      role: typeof details?.suggestedRole === "string" ? details.suggestedRole : "Personal knowledge vault",
+      routingHints: Array.isArray(details?.routingHints) ? details?.routingHints.filter((hint): hint is string => typeof hint === "string").join(", ") : "",
+      egressPolicy: "local_only",
+      writePolicy: "confirm_every_write",
+      graphEnabled: true,
+      noteCount: typeof details?.noteCount === "number" ? details.noteCount : undefined,
+      routerCandidates: Array.isArray(details?.routerCandidates)
+        ? details.routerCandidates.filter((path): path is string => typeof path === "string")
+        : [],
+      contextCandidates: Array.isArray(details?.contextCandidates)
+        ? details.contextCandidates.filter((path): path is string => typeof path === "string")
+        : [],
+    });
+  };
+
+  const createBrain = async () => {
+    if (!addBrain) return;
+    const result = await callFeature<unknown>(
+      "create_brain",
+      {
+        request: {
+          selectionToken: addBrain.selectionToken,
+          name: addBrain.name,
+          role: addBrain.role,
+          routingHints: addBrain.routingHints.split(",").map((hint) => hint.trim()).filter(Boolean),
+          egressPolicy: addBrain.egressPolicy,
+          writePolicy: addBrain.writePolicy,
+          graphEnabled: addBrain.graphEnabled,
+        },
+      },
+      "Creating a brain needs the native Kairos registration update. Nothing has been written.",
+    );
+    if (result) {
+      setAddBrain(null);
+      await refreshBrains();
+      await refreshGraph();
+    }
+  };
+
+  const updateBrainPolicy = async () => {
+    if (!policyEditor) return;
+    setPolicyBusy(true);
+    setPolicyFeedback(null);
+    const result = await callFeature<unknown>(
+      "update_brain_policy",
+      {
+        brainId: policyEditor.brainId,
+        egressPolicy: policyEditor.egressPolicy,
+        writePolicy: policyEditor.writePolicy,
+        graphEnabled: policyEditor.graphEnabled,
+      },
+      "Kairos could not update this brain policy. Nothing changed.",
+    );
+    const updatedBrain = normalizeBrains([result])?.[0];
+    if (updatedBrain) {
+      const nextBrains = brains.map((brain) => brain.id === updatedBrain.id ? { ...brain, ...updatedBrain } : brain);
+      const nextWritableBrains = nextBrains.filter(canConfirmWrites);
+      setBrains(nextBrains);
+      setWriteDraft((current) => canConfirmWrites(nextBrains.find((brain) => brain.id === current.brainId) ?? {
+        id: "",
+        name: "",
+        role: "",
+      })
+        ? current
+        : { ...current, brainId: nextWritableBrains[0]?.id ?? "" });
+      setPolicyEditor(null);
+      setPolicyFeedback(`${updatedBrain.name} policy saved.`);
+    }
+    setPolicyBusy(false);
+  };
+
+  const savePreferences = async () => {
+    setPreferencesFeedback(null);
+    const result = await callFeature<unknown>(
+      "save_app_preferences",
+      {
+        shortcut: preferences.shortcut,
+        summonTarget: preferences.summonTarget,
+        launchAtLogin: preferences.launchAtLogin,
+        closeToHide: preferences.closeToHide,
+        contextWindowTokens: preferences.contextWindowTokens,
+        memoryBudgetGb: memoryBudget === "auto" ? null : effectiveMemoryBudget,
+      },
+      "These preferences will save once the native settings bridge is included. The preview is unchanged.",
+    );
+    if (result) setPreferencesFeedback("Preferences saved locally. Shortcut changes apply immediately in the desktop app.");
+  };
+
+  const saveProviderSettings = async () => {
+    if (activeProvider.id === "ollama") return;
+    setProviderSettingsBusy(true);
+    setProviderSettingsFeedback(null);
+    const result = await callFeature<AppStatus>(
+      "save_provider_settings",
+      {
+        providerId,
+        model: providerModel.trim() || undefined,
+        apiKey: providerApiKey.trim() || undefined,
+        enabled: true,
+        makeActive: true,
+      },
+      "Provider configuration needs the native Kairos update. No key was stored.",
+    );
+    if (result) {
+      setStatus(result);
+      setProviderApiKey("");
+      setProviderSettingsFeedback(`${activeProvider.label} is configured. Kairos will still show every outbound turn before sending it.`);
+    }
+    setProviderSettingsBusy(false);
+  };
+
+  const previewNoteWrite = async () => {
+    if (!brains.some(canConfirmWrites)) {
+      setWriteFeedback("No connected brain currently permits note writes. Set a brain to Confirm every write before preparing a diff.");
+      return;
+    }
+    setWriteBusy(true);
+    setWriteFeedback(null);
+    const proposal = await callFeature<NoteWriteProposal>(
+      "draft_note_write",
+      writeDraft,
+      "Kairos could not prepare a safe write preview. Nothing was changed.",
+    );
+    if (proposal) setWriteProposal(proposal);
+    setWriteBusy(false);
+  };
+
+  const confirmNoteWrite = async () => {
+    if (!writeProposal) return;
+    setWriteBusy(true);
+    setWriteFeedback(null);
+    const result = await callFeature<{ relativePath?: string }>(
+      "confirm_note_write",
+      { proposalId: writeProposal.id, nonce: writeProposal.nonce },
+      "Kairos could not confirm this write. The note was not changed.",
+    );
+    if (result) {
+      setWriteFeedback(`Saved ${result.relativePath ?? writeProposal.relativePath}.`);
+      setWriteProposal(null);
+      setWriteDraft((current) => ({ ...current, markdown: "" }));
+      await refreshGraph();
+    }
+    setWriteBusy(false);
+  };
+
+  const graphNodes = useMemo(() => graph.nodes.filter((node) => {
+    const matchesBrain = graphFilter === "all" || node.brainId === graphFilter || node.id === "kairos";
+    const needle = graphSearch.trim().toLowerCase();
+    const matchesSearch = !needle || node.label.toLowerCase().includes(needle);
+    return matchesBrain && matchesSearch && !node.protected;
+  }), [graph, graphFilter, graphSearch]);
+  const graphNodeIds = new Set(graphNodes.map((node) => node.id));
+  const graphEdges = graph.edges.filter((edge) => graphNodeIds.has(edge.source) && graphNodeIds.has(edge.target));
+
+  const showView = (nextView: ViewId) => {
+    setView(nextView);
+    setExpanded(true);
+    setCapabilityNotice(null);
+  };
+
+  const setupState = !status?.initialized
+    ? { title: "Connect your brains", detail: "Create the local Kairos registry before model and vault settings can be saved.", tone: "warning" as const }
+    : !ollamaRunning
+      ? { title: localSetup?.ollamaInstalled === false ? "Install Ollama" : "Start Ollama", detail: localSetup?.setupMessage ?? "Kairos cannot reach Ollama at localhost:11434.", tone: "danger" as const }
+      : !selectedModelInstalled
+        ? { title: "Download the selected model", detail: status?.model.setupMessage ?? "The selected model is not installed yet.", tone: "warning" as const }
+        : { title: "Local AI is ready", detail: `${activeModel} · ${status?.model.contextWindowTokens ? status.model.contextWindowTokens / 1024 : 32}K context · local only`, tone: "success" as const };
+
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${expanded ? "is-expanded" : "is-compact"}`}>
       <section className="control-plane">
         <header className="app-header">
           <div className="brand-lockup">
             <img className="brand-mark" src={brandMark} alt="Kairos" />
             <img className="brand-wordmark" src={brandWordmark} alt="Kairos — Knowledge, Action, Intelligence, Routing" />
           </div>
-          <div className="summon-key" title="Toggle Kairos">
-            <span>SUMMON</span>
-            <kbd>⌥ Space</kbd>
+          <div className="header-actions">
+            <div className="summon-key" title="Toggle Kairos">
+              <span>SUMMON</span>
+              <kbd>⌥ Space</kbd>
+            </div>
+            <button className="icon-button expand-button" onClick={() => setExpanded((open) => !open)} aria-label={expanded ? "Use compact chat" : "Expand Kairos"}>
+              {expanded ? "⌃" : "⌄"}
+            </button>
           </div>
         </header>
 
-        <section className="moment-panel" aria-labelledby="brief-question">
-          <div className="routing-visual" aria-hidden={busy}>
-            {busy ? <KairosLoader /> : <img src={routeIcon} alt="" />}
-          </div>
-          <div className="moment-copy">
-            <p className="section-label">{routeLabel}</p>
-            <h1 id="brief-question">{briefQuestion}</h1>
-            <p className="moment-description">
-              Local evidence, deliberate routing, one useful next action.
-            </p>
-          </div>
-
-          <div className="runtime-status" aria-live="polite">
-            <span className={`status-dot ${modelReady ? "is-ready" : "needs-setup"}`} />
-            <span>
-              {status?.initialized
-                ? modelReady
-                  ? `${activeModel} · local`
-                  : status.model.setupMessage ?? "Local model needs setup"
-                : "Create a local registry to connect your brains"}
-            </span>
-          </div>
-
-          {!nativeRuntime && (
-            <p className="preview-notice">
-              Browser preview · local vault access is available in the Kairos desktop app.
-            </p>
-          )}
-
-          {!status?.initialized ? (
-            <button
-              className="primary-action"
-              onClick={initialize}
-              disabled={busy || !nativeRuntime}
-              title={nativeRuntime ? undefined : "Open the desktop app to connect your local brains"}
-            >
-              {busy ? "Preparing local registry…" : "Connect my existing brains"}
-            </button>
-          ) : (
-            <button
-              className="primary-action"
-              onClick={brief}
-              disabled={busy || !modelReady || !nativeRuntime}
-              title={nativeRuntime ? undefined : "Open the desktop app to compose a local brief"}
-            >
-              {busy ? "Composing from local evidence…" : "Compose my brief"}
-            </button>
-          )}
-
-          {status?.initialized && (
-            <label className="model-settings" htmlFor="local-model">
-              <span>Local synthesis model</span>
-              <select
-                id="local-model"
-                value={status.model.selectedModel}
-                disabled={busy || !nativeRuntime}
-                onChange={(event) => void selectModel(event.target.value)}
+        {expanded && (
+          <nav className="primary-nav" aria-label="Kairos sections">
+            {([
+              ["chat", "Chat"],
+              ["next", "What Next"],
+              ["map", "Brain Map"],
+              ["settings", "Settings"],
+            ] as Array<[ViewId, string]>).map(([id, label]) => (
+              <button
+                key={id}
+                className={`nav-button ${view === id ? "is-active" : ""}`}
+                onClick={() => showView(id)}
+                aria-current={view === id ? "page" : undefined}
               >
-                {status.model.choices.map((choice) => (
-                  <option key={choice.id} value={choice.id}>
-                    {choice.label} — {choice.role}
-                  </option>
-                ))}
-              </select>
-              <small>
-                Saved locally · {status.model.contextWindowTokens / 1024}K context · {status.model.endpoint}
-              </small>
-            </label>
-          )}
-        </section>
+                {label}
+              </button>
+            ))}
+          </nav>
+        )}
+
+        {!nativeRuntime && (
+          <p className="preview-notice">
+            Browser preview · local routing, downloads, and vault access activate in the Kairos desktop app.
+          </p>
+        )}
+
+        {capabilityNotice && (
+          <aside className="capability-notice" role="status">
+            <span>{capabilityNotice}</span>
+            <button onClick={() => setCapabilityNotice(null)} aria-label="Dismiss notice">×</button>
+          </aside>
+        )}
 
         {error && <p className="error-state" role="alert">{error}</p>}
 
-        {pack && (
-          <section className="brief-result" aria-live="polite">
-            <div className="result-header">
-              <div className="route-summary">
-                <img src={routeIcon} alt="" />
-                <div>
-                  <p className="section-label">{routeLabel}</p>
-                  <h2>{pack.route.brains.map((brain) => brain.name).join(" + ")}</h2>
-                </div>
+        {view === "chat" && (
+          <section className="chat-surface" aria-label="Kairos chat">
+            <div className="chat-heading">
+              <div>
+                <p className="section-label">Kairos chat</p>
+                <h1>{expanded ? "Ask from the right context." : "What matters now?"}</h1>
               </div>
-              <span className="local-boundary">LOCAL ONLY</span>
+              <StatusPill tone={activeProvider.external ? "warning" : "local"}>
+                {activeProvider.external ? "PREVIEW FIRST" : "LOCAL"}
+              </StatusPill>
             </div>
 
-            {answer && (
-              <article className="selected-action">
-                <p className="section-label">Selected moment · {activeModel}</p>
-                <h3>{answer.action}</h3>
-                <p>{answer.why}</p>
-                <p className="action-caveat">{answer.caveat}</p>
-                {answer.sourceIds.length > 0 && (
-                  <div className="citation-row" aria-label="Grounding sources">
-                    {pack.sources
-                      .filter((source) => answer.sourceIds.includes(source.source.id))
-                      .slice(0, 3)
-                      .map(({ source }) => <CitationChip key={source.id} source={source} />)}
-                    {answer.sourceIds.length > 3 && (
-                      <span className="citation-more">+{answer.sourceIds.length - 3}</span>
-                    )}
+            <div className="chat-context-bar">
+              <label>
+                <span>Route</span>
+                <select value={brainOverride} onChange={(event) => setBrainOverride(event.target.value)}>
+                  <option value="auto">Auto-route</option>
+                  {brains.filter((brain) => brain.enabled !== false).map((brain) => (
+                    <option key={brain.id} value={brain.id}>{brain.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                <span>Provider</span>
+                <select value={providerId} onChange={(event) => setProviderId(event.target.value as ProviderId)}>
+                  {providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
+                </select>
+              </label>
+            </div>
+
+            <div className="chat-thread" aria-live="polite">
+              {chatMessages.map((message) => (
+                <article key={message.id} className={`chat-message chat-message--${message.role} ${message.notice ? "is-notice" : ""}`}>
+                  <div className="message-meta">
+                    <span>{message.role === "assistant" ? "Kairos" : "You"}</span>
+                    {message.provider && <span>{message.provider}</span>}
+                    <time>{shortDate(message.createdAt)}</time>
+                  </div>
+                  <p>{message.body}</p>
+                  <RouteChips routes={message.routes} />
+                  {message.citations?.length ? (
+                    <div className="citation-row">
+                      {message.citations.map((citation) => <CitationChip key={citation.id} citation={citation} />)}
+                    </div>
+                  ) : null}
+                </article>
+              ))}
+              {streamingAssistant && (
+                <article className="chat-message chat-message--assistant is-streaming" aria-label="Kairos is replying">
+                  <div className="message-meta"><span>Kairos</span><span>Ollama · local</span><time>{shortDate(streamingAssistant.createdAt)}</time></div>
+                  {streamingAssistant.body ? <p>{streamingAssistant.body}<span className="stream-caret" aria-hidden="true" /></p> : <div className="stream-pending"><KairosLoader /><span>Composing from approved local context…</span></div>}
+                </article>
+              )}
+              {busy && !streamingAssistant && (
+                <article className="chat-message chat-message--assistant is-loading">
+                  <KairosLoader />
+                  <span>{activeProvider.external ? "Preparing your reviewed handoff…" : "Routing approved local context…"}</span>
+                </article>
+              )}
+            </div>
+
+            {chatPreview && (
+              <aside className="consent-preview" aria-label="External provider preview">
+                <div className="consent-preview__heading">
+                  <div>
+                    <p className="section-label">External handoff preview</p>
+                    <h2>Review before sending</h2>
+                  </div>
+                  <StatusPill tone="warning">NOT SENT</StatusPill>
+                </div>
+                <dl className="preview-list">
+                  <div><dt>Destination</dt><dd>{chatPreview.providerLabel}</dd></div>
+                  <div><dt>Message</dt><dd>{chatPreview.outgoingSummary}</dd></div>
+                  <div><dt>Routed brains</dt><dd>{chatPreview.routes.length ? chatPreview.routes.map((route) => route.name).join(", ") : "No route selected yet"}</dd></div>
+                  <div><dt>Attachments</dt><dd>{chatPreview.attachmentNames.length ? `${chatPreview.attachmentNames.join(", ")} (temporary local extraction included)` : "None"}</dd></div>
+                </dl>
+                {chatPreview.citations.length > 0 && (
+                  <div className="citation-row">
+                    {chatPreview.citations.map((citation) => <CitationChip key={citation.id} citation={citation} />)}
                   </div>
                 )}
-              </article>
-            )}
-
-            {pack.freshnessWarnings.length > 0 && (
-              <aside className="freshness-notice">
-                {pack.freshnessWarnings.map((warning) => <p key={warning}>{warning}</p>)}
+                <div className="consent-actions">
+                  <button className="secondary-action" onClick={() => setChatPreview(null)}>Cancel</button>
+                  <button className="primary-action" onClick={() => void submitChat(true)} disabled={busy || !chatPreview.previewToken}>Confirm and send</button>
+                </div>
               </aside>
             )}
 
-            <details className="evidence-drawer">
-              <summary>
-                <span>Local evidence</span>
-                <span>{pack.sources.length} approved source{pack.sources.length === 1 ? "" : "s"}</span>
-              </summary>
-              <div className="evidence-list">
-                {pack.sources.map(({ source, content, truncated }) => (
-                  <article className="evidence-item" key={source.id}>
-                    <div className="evidence-item__meta">
-                      <CitationChip source={source} />
-                      {source.modifiedAt && <time>{new Date(source.modifiedAt).toLocaleDateString()}</time>}
+            <div className="chat-composer">
+              {attachments.length > 0 && (
+                <div className="attachment-row" aria-label="Temporary attachments">
+                  {attachments.map((attachment) => (
+                    <span key={attachment.id} className="attachment-chip">
+                      <span>⌁</span>{attachment.name}
+                      <button onClick={() => discardAttachment(attachment.id)} aria-label={`Remove ${attachment.name}`}>×</button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <textarea
+                value={composer}
+                onChange={(event) => setComposer(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                    event.preventDefault();
+                    void submitChat();
+                  }
+                }}
+                placeholder="Ask Kairos about a project, decision, or next action…"
+                rows={expanded ? 3 : 2}
+              />
+              <div className="composer-actions">
+                <button className="attachment-button" onClick={() => void pickTemporaryAttachments()} title="Temporary local file selection">Attach</button>
+                <span className="composer-hint">⌘↵ to send · {activeProvider.detail}</span>
+                <button className="primary-action" onClick={() => void submitChat()} disabled={!composer.trim() || busy}>
+                  {activeProvider.external ? "Preview" : "Send"}
+                </button>
+              </div>
+              {attachmentNotice && <p className="attachment-notice">{attachmentNotice}</p>}
+            </div>
+          </section>
+        )}
+
+        {expanded && view === "next" && (
+          <section className="dashboard-surface">
+            <div className="surface-heading">
+              <div>
+                <p className="section-label">Cross-brain pulse</p>
+                <h1>What should I do next?</h1>
+                <p>One useful action, grounded in approved local context.</p>
+              </div>
+              <div className="surface-heading__actions">
+                <StatusPill tone={activeProvider.external ? "warning" : "local"}>{activeProvider.external ? "PREVIEW FIRST" : "LOCAL ONLY"}</StatusPill>
+                <button className="primary-action" onClick={() => void runPulse()} disabled={busy || (!activeProvider.external && !modelReady)}>
+                  {busy ? "Composing…" : activeProvider.external ? "Review cloud pulse" : "Compose pulse"}
+                </button>
+              </div>
+            </div>
+
+            <div className="pulse-overview">
+              <div className="pulse-route-visual">{busy ? <KairosLoader /> : <img src={routeIcon} alt="" />}</div>
+              <div>
+                <p className="section-label">{routeLabel}</p>
+                <h2>{briefResult ? briefResult.context.route.brains.map((brain) => brain.name).join(" + ") : "Everyday + PhD pulse"}</h2>
+                <p>{briefResult ? "Only selected evidence was included." : "Kairos will route to the smallest useful set of enabled brains."}</p>
+              </div>
+              <div className="pulse-status">
+                <span className={`status-dot ${modelReady ? "is-ready" : "needs-setup"}`} />
+                <span>{modelReady ? `${activeModel} · 32K local context` : setupState.title}</span>
+              </div>
+            </div>
+
+            {!status?.initialized && (
+              <div className="setup-inline">
+                <div><strong>First, connect your existing brains.</strong><span>It creates a local registry only; your notes stay where they are.</span></div>
+                <button className="secondary-action" onClick={() => void initialize()} disabled={busy || !nativeRuntime}>Connect brains</button>
+              </div>
+            )}
+
+            {briefResult && (
+              <section className="brief-result" aria-live="polite">
+                <div className="result-header">
+                  <div className="route-summary">
+                    <img src={routeIcon} alt="" />
+                    <div><p className="section-label">Authoritative route</p><h2>{briefResult.context.route.brains.map((brain) => brain.name).join(" + ")}</h2></div>
+                  </div>
+                  <StatusPill tone="local">LOCAL ONLY</StatusPill>
+                </div>
+                <article className="selected-action">
+                  <p className="section-label">Selected moment · {activeModel}</p>
+                  <h3>{briefResult.answer.action}</h3>
+                  <p>{briefResult.answer.why}</p>
+                  <p className="action-caveat">{briefResult.answer.caveat}</p>
+                  {briefResult.answer.sourceIds.length > 0 && (
+                    <div className="citation-row">
+                      {briefResult.context.sources.filter((source) => briefResult.answer.sourceIds.includes(source.source.id)).slice(0, 3).map(({ source }) => (
+                        <CitationChip key={source.id} citation={sourceCitation(source)} />
+                      ))}
                     </div>
-                    <pre>{content}</pre>
-                    {truncated && <small>Bounded before reaching the local model.</small>}
-                  </article>
+                  )}
+                </article>
+                {briefResult.context.freshnessWarnings.length > 0 && (
+                  <aside className="freshness-notice">{briefResult.context.freshnessWarnings.map((warning) => <p key={warning}>{warning}</p>)}</aside>
+                )}
+                <details className="evidence-drawer">
+                  <summary><span>Approved local evidence</span><span>{briefResult.context.sources.length} source{briefResult.context.sources.length === 1 ? "" : "s"}</span></summary>
+                  <div className="evidence-list">
+                    {briefResult.context.sources.map(({ source, content, truncated }) => (
+                      <article className="evidence-item" key={source.id}>
+                        <div className="evidence-item__meta"><CitationChip citation={sourceCitation(source)} />{source.modifiedAt && <time>{shortDate(source.modifiedAt)}</time>}</div>
+                        <pre>{content}</pre>
+                        {truncated && <small>Bounded before reaching the model.</small>}
+                      </article>
+                    ))}
+                  </div>
+                </details>
+                {briefResult.context.withheldSources.length > 0 && <p className="withheld-note">Protected sources were withheld by policy.</p>}
+              </section>
+            )}
+          </section>
+        )}
+
+        {expanded && view === "map" && (
+          <section className="map-surface">
+            <div className="surface-heading">
+              <div>
+                <p className="section-label">Whole-brain atlas</p>
+                <h1>See the shape of your memory.</h1>
+                <p>Explicit Markdown links, tags, and registered bridges only. Protected notes never appear here.</p>
+              </div>
+              <button className="secondary-action" onClick={() => void refreshGraph()} disabled={graphBusy}>{graphBusy ? "Refreshing…" : "Refresh metadata"}</button>
+            </div>
+
+            <div className="graph-toolbar">
+              <div className="graph-filters" aria-label="Graph filters">
+                <button className={graphFilter === "all" ? "is-active" : ""} onClick={() => setGraphFilter("all")}>All brains</button>
+                {brains.filter((brain) => brain.graphEnabled !== false && brain.enabled !== false).map((brain) => (
+                  <button key={brain.id} className={graphFilter === brain.id ? "is-active" : ""} onClick={() => setGraphFilter(brain.id)}>{brain.name.replace(" Brain", "")}</button>
                 ))}
               </div>
-            </details>
+              <label className="graph-search"><span className="sr-only">Search graph</span><input value={graphSearch} onChange={(event) => setGraphSearch(event.target.value)} placeholder="Find a note or map" /></label>
+            </div>
 
-            {pack.withheldSources.length > 0 && (
-              <p className="withheld-note">Protected sources were withheld by policy.</p>
-            )}
+            <div className="graph-layout">
+              <div className="graph-canvas" aria-label="Kairos whole brain graph">
+                <svg className="graph-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                  {graphEdges.map((edge) => {
+                    const source = graphNodes.find((node) => node.id === edge.source);
+                    const target = graphNodes.find((node) => node.id === edge.target);
+                    if (!source || !target) return null;
+                    return <line key={`${edge.source}-${edge.target}`} x1={source.x} y1={source.y} x2={target.x} y2={target.y} />;
+                  })}
+                </svg>
+                {graphNodes.map((node) => {
+                  const visual = brainVisual(node.brainId);
+                  return (
+                    <button
+                      key={node.id}
+                      className={`graph-node graph-node--${node.kind ?? "note"} ${selectedGraphNode === node.id ? "is-selected" : ""}`}
+                      style={{ "--node-color": visual.color, left: `${node.x}%`, top: `${node.y}%` } as CSSProperties}
+                      onClick={() => setSelectedGraphNode(node.id)}
+                      title={`${node.label} · ${visual.label}`}
+                    >
+                      <span className="graph-node__dot" />
+                      <span>{node.label}</span>
+                    </button>
+                  );
+                })}
+                {graphNodes.length === 0 && <div className="graph-empty">No matching public graph metadata.</div>}
+              </div>
+              <aside className="graph-inspector">
+                {graphNode ? (
+                  <>
+                    <p className="section-label">Selected node</p>
+                    <h2>{graphNode.label}</h2>
+                    <RouteChips routes={[{ id: graphNode.brainId, name: brainVisual(graphNode.brainId).label }]} />
+                    <p>{graphNode.kind === "bridge" ? "Registered cross-brain bridge" : "Explicit metadata node"}</p>
+                    <small>Graph views metadata only. Open the source through its owning brain when needed.</small>
+                  </>
+                ) : (
+                  <>
+                    <p className="section-label">Progressive atlas</p>
+                    <h2>{graphNodes.length} visible nodes</h2>
+                    <p>Choose a node to inspect its safe metadata. Larger vaults progressively load up to the app’s graph limit.</p>
+                    <small>{graph.stale ? "Metadata is stale; refresh when the vault is available." : graph.indexedAt ? `Indexed ${shortDate(graph.indexedAt)}` : "Preview topology until your first metadata scan."}</small>
+                  </>
+                )}
+              </aside>
+            </div>
+          </section>
+        )}
+
+        {expanded && view === "settings" && (
+          <section className="settings-surface">
+            <div className="surface-heading">
+              <div>
+                <p className="section-label">Control room</p>
+                <h1>Make Kairos yours.</h1>
+                <p>Brains remain authoritative. Kairos stores only connections, policies, and local app settings.</p>
+              </div>
+              <button className="secondary-action" onClick={() => void refreshStatus()}>Refresh status</button>
+            </div>
+
+            <section className="settings-card local-setup-card">
+              <div className="settings-card__heading">
+                <div><p className="section-label">Local AI setup</p><h2>{setupState.title}</h2><p>{setupState.detail}</p></div>
+                <StatusPill tone={setupState.tone}>{ollamaRunning ? "OLLAMA" : "SETUP"}</StatusPill>
+              </div>
+              <div className="hardware-grid">
+                <div><span>Detected unified memory</span><strong>{detectedMemoryGb ? `${detectedMemoryGb} GB` : "Detecting…"}</strong><small>Auto-detected; not manually claimed.</small></div>
+                <div><span>Free disk</span><strong>{availableDiskGb ? `${availableDiskGb} GB` : "Detecting…"}</strong><small>Model packages are stored by Ollama.</small></div>
+                <div><span>Context target</span><strong>32K</strong><small>More context also uses more memory.</small></div>
+              </div>
+              <div className="memory-controls">
+                <label><span>Memory budget</span><select value={String(memoryBudget)} onChange={(event) => setMemoryBudget((event.target.value === "auto" || event.target.value === "custom" ? event.target.value : Number(event.target.value)) as MemoryBudget)}>
+                  <option value="auto">{detectedMemoryGb ? `Auto (${detectedMemoryGb} GB detected)` : "Auto (detect hardware)"}</option>
+                  {[16, 24, 32, 48, 64, 96, 192].map((amount) => <option key={amount} value={amount}>{amount} GB</option>)}
+                  <option value="custom">Custom</option>
+                </select></label>
+                {memoryBudget === "custom" && <label><span>Custom budget (GB)</span><input type="number" min="1" value={customMemoryBudget} onChange={(event) => setCustomMemoryBudget(event.target.value)} /></label>}
+                <p>Kairos uses this as a recommendation budget. Model fit also depends on free memory, context, and other running apps.</p>
+              </div>
+              {!ollamaRunning && (
+                <div className="setup-inline setup-inline--warning">
+                  <div><strong>{localSetup?.ollamaInstalled === false ? "Ollama is not installed." : "Ollama is not running."}</strong><span>Install or start it, then return here and refresh status.</span></div>
+                  <button className="primary-action" onClick={() => void openOllamaInstall()}>Install Ollama</button>
+                </div>
+              )}
+              <div className="model-grid">
+                {Object.entries(modelCatalog).map(([id, model]) => {
+                  const setupModel = localSetup?.models?.find((candidate) => candidate.id === id);
+                  const installed = setupModel?.installed ?? status?.model.installedModels.includes(id) ?? false;
+                  const selected = status?.model.selectedModel === id;
+                  const working = modelOperation?.model === id;
+                  const pulling = modelOperation?.kind === "pull" && modelOperation.model === id;
+                  const progress = pulling && pullProgress?.model === id ? pullProgress : null;
+                  return <article className={`model-card ${selected ? "is-selected" : ""}`} key={id}>
+                    <div><p className="section-label">{model.role}</p><h3>{model.label}</h3><p>{setupModel?.memoryBand ?? model.memoryBand}</p></div>
+                    <dl><div><dt>Package</dt><dd>{setupModel?.downloadSize ?? model.downloadSize}</dd></div><div><dt>Context</dt><dd>{setupModel?.recommendedContext ?? model.context}</dd></div></dl>
+                    <div className="model-card__actions">
+                      {installed ? <StatusPill tone="success">INSTALLED</StatusPill> : pulling ? <div className="model-pull-progress"><progress max="100" value={progress?.percent} /><span>{progress?.percent !== undefined ? `${Math.round(progress.percent)}% · ${progress.status}` : progress?.status ?? "Starting download…"}</span><button className="secondary-action" onClick={() => void cancelPullModel(id)}>Cancel</button></div> : <button className="secondary-action" onClick={() => void handlePullModel(id)} disabled={Boolean(working)}>{failedPullModel === id ? "Retry download" : "Download"}</button>}
+                      {installed && <button className="text-action" onClick={() => void handleTestModel(id)} disabled={Boolean(working)}>{working && modelOperation?.kind === "test" ? "Testing…" : "Test"}</button>}
+                      {installed && !selected && <button className="text-action" onClick={() => void selectModel(id)} disabled={busy}>Use this model</button>}
+                    </div>
+                  </article>;
+                })}
+              </div>
+              {setupFeedback && <p className="settings-feedback">{setupFeedback}</p>}
+            </section>
+
+            <section className="settings-grid">
+              <article className="settings-card">
+                <div className="settings-card__heading"><div><p className="section-label">Summon</p><h2>Opening behaviour</h2></div><kbd>⌥ Space</kbd></div>
+                <label className="field-label"><span>Shortcut</span><input value={preferences.shortcut} onChange={(event) => setPreferences((current) => ({ ...current, shortcut: event.target.value }))} /></label>
+                <label className="field-label"><span>Open to</span><select value={preferences.summonTarget} onChange={(event) => setPreferences((current) => ({ ...current, summonTarget: event.target.value as "compact" | "last-page" }))}><option value="compact">Compact chat</option><option value="last-page">Last open page</option></select></label>
+                <label className="toggle-row"><input type="checkbox" checked={preferences.launchAtLogin} onChange={(event) => setPreferences((current) => ({ ...current, launchAtLogin: event.target.checked }))} /><span><strong>Launch at login</strong><small>Keep Kairos ready in the menu bar.</small></span></label>
+                <label className="toggle-row"><input type="checkbox" checked={preferences.closeToHide} onChange={(event) => setPreferences((current) => ({ ...current, closeToHide: event.target.checked }))} /><span><strong>Hide when the window closes</strong><small>Keep Kairos running in the menu bar instead of quitting.</small></span></label>
+                <label className="field-label"><span>Context window</span><select value={preferences.contextWindowTokens} onChange={(event) => setPreferences((current) => ({ ...current, contextWindowTokens: Number(event.target.value) }))}><option value={16_384}>16K · lighter local load</option><option value={32_768}>32K · recommended start</option><option value={65_536}>64K · requires more memory</option></select></label>
+                <button className="secondary-action" onClick={() => void savePreferences()}>Save preferences</button>
+                {preferencesFeedback && <p className="settings-feedback">{preferencesFeedback}</p>}
+              </article>
+
+              <article className="settings-card">
+                <div className="settings-card__heading"><div><p className="section-label">Provider</p><h2>Inference destination</h2></div><StatusPill tone={activeProvider.external ? "warning" : "local"}>{activeProvider.external ? "REVIEW" : "LOCAL"}</StatusPill></div>
+                <label className="field-label"><span>Active provider</span><select value={providerId} onChange={(event) => setProviderId(event.target.value as ProviderId)}>{providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}</select></label>
+                <p className="provider-detail">{activeProvider.detail}</p>
+                {activeProvider.id === "ollama" ? (
+                  <label className="field-label"><span>Active local model</span><select value={status?.model.selectedModel ?? ""} onChange={(event) => void selectModel(event.target.value)} disabled={!status || busy || !nativeRuntime}>{status?.model.choices.map((choice) => <option key={choice.id} value={choice.id}>{choice.label}</option>)}</select></label>
+                ) : (
+                  <>
+                    <div className="provider-boundary"><strong>Cloud consent boundary</strong><span>Every turn shows the outgoing message, approved notes, temporary-file extraction, destination, and model before it is sent. Keys stay in macOS Keychain when connected natively.</span></div>
+                    {activeProvider.id === "openai" || activeProvider.id === "anthropic" ? (
+                      <>
+                        <label className="field-label"><span>Model identifier</span><input value={providerModel} onChange={(event) => setProviderModel(event.target.value)} placeholder="Choose the model you pay for" /></label>
+                        <label className="field-label"><span>API key</span><input type="password" value={providerApiKey} onChange={(event) => setProviderApiKey(event.target.value)} placeholder="Stored only in macOS Keychain" autoComplete="off" /></label>
+                      </>
+                    ) : null}
+                    <button className="secondary-action" onClick={() => void saveProviderSettings()} disabled={providerSettingsBusy || !nativeRuntime}>{providerSettingsBusy ? "Saving…" : "Save provider"}</button>
+                    {providerSettingsFeedback && <p className="settings-feedback">{providerSettingsFeedback}</p>}
+                  </>
+                )}
+              </article>
+            </section>
+
+            <section className="settings-card brain-registry-card">
+              <div className="settings-card__heading">
+                <div><p className="section-label">Brain registry</p><h2>Connected Obsidian brains</h2><p>Register a folder through the native picker, then explicitly choose its policy.</p></div>
+                <button className="primary-action" onClick={() => void pickBrainFolder()}>Add brain</button>
+              </div>
+              <div className="brain-card-grid">
+                {brains.map((brain) => {
+                  const visual = brainVisual(brain.id);
+                  return <article className="brain-card" key={brain.id} style={{ "--brain-color": visual.color } as CSSProperties}>
+                    <div className="brain-card__heading"><span className="brain-card__mark">{visual.label.slice(0, 1)}</span><div><h3>{brain.name}</h3><p>{brain.role}</p></div><StatusPill tone={brain.status === "ready" ? "success" : brain.status === "offline" ? "warning" : "neutral"}>{brain.status ?? "ready"}</StatusPill></div>
+                    {brain.rootPath && <code>{brain.rootPath}</code>}
+                    <div className="brain-policy-row"><span>{brain.graphEnabled ? "In graph" : "Graph hidden"}</span><span>{brain.egressPolicy?.replaceAll("_", " ")}</span><span>{brain.writePolicy?.replaceAll("_", " ")}</span></div>
+                    <div className="brain-card__actions"><button className="text-action" onClick={() => setPolicyEditor((current) => current?.brainId === brain.id ? null : policyDraftFor(brain))}>{policyEditor?.brainId === brain.id ? "Close policy" : "Configure policy"}</button></div>
+                    {policyEditor?.brainId === brain.id && (
+                      <form className="brain-policy-editor" onSubmit={(event) => { event.preventDefault(); void updateBrainPolicy(); }}>
+                        <label className="field-label"><span>Egress</span><select value={policyEditor.egressPolicy} onChange={(event) => setPolicyEditor((current) => current ? { ...current, egressPolicy: event.target.value as BrainPolicyDraft["egressPolicy"] } : current)}><option value="local_only">Local only</option><option value="cloud_allowed">Cloud allowed · preview every turn</option><option value="redact_required">Redaction required</option></select></label>
+                        <label className="field-label"><span>Note writes</span><select value={policyEditor.writePolicy} onChange={(event) => setPolicyEditor((current) => current ? { ...current, writePolicy: event.target.value as BrainPolicyDraft["writePolicy"] } : current)}><option value="readonly">Read only</option><option value="confirm_every_write">Confirm every write</option><option value="prohibited">Prohibited</option></select></label>
+                        <label className="toggle-row"><input type="checkbox" checked={policyEditor.graphEnabled} onChange={(event) => setPolicyEditor((current) => current ? { ...current, graphEnabled: event.target.checked } : current)} /><span><strong>Include safe metadata in Brain Map</strong><small>Protected and explicit-only notes stay excluded.</small></span></label>
+                        <p className="policy-boundary">Cloud allowed still requires a per-turn review. Prohibited disables note writes completely.</p>
+                        <div className="consent-actions"><button type="button" className="secondary-action" onClick={() => setPolicyEditor(null)} disabled={policyBusy}>Cancel</button><button className="primary-action" type="submit" disabled={policyBusy}>{policyBusy ? "Saving…" : "Save policy"}</button></div>
+                      </form>
+                    )}
+                  </article>;
+                })}
+              </div>
+              {addBrain && (
+                <form className="add-brain-form" onSubmit={(event) => { event.preventDefault(); void createBrain(); }}>
+                  <div className="form-heading"><div><p className="section-label">Confirm new brain</p><h3>Review scope before registration</h3><p>{addBrain.displayPath ?? "Native folder selected"}{addBrain.noteCount !== undefined ? ` · ${addBrain.noteCount} safe notes found` : ""}</p></div><button type="button" className="icon-button" onClick={() => setAddBrain(null)} aria-label="Cancel add brain">×</button></div>
+                  <div className="retrieval-scope">
+                    <p className="section-label">Planned retrieval scope</p>
+                    <div><strong>Startup router paths</strong>{addBrain.routerCandidates.length ? <ul>{addBrain.routerCandidates.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : <span>None found — this brain will not receive startup router context.</span>}</div>
+                    <div><strong>Context retrieval paths</strong>{addBrain.contextCandidates.length ? <ul>{addBrain.contextCandidates.map((path) => <li key={path}><code>{path}</code></li>)}</ul> : <span>None found — no notes are planned for retrieval until configured.</span>}</div>
+                  </div>
+                  <div className="form-grid">
+                    <label className="field-label"><span>Name</span><input required value={addBrain.name} onChange={(event) => setAddBrain((current) => current ? { ...current, name: event.target.value } : current)} /></label>
+                    <label className="field-label"><span>Role</span><input required value={addBrain.role} onChange={(event) => setAddBrain((current) => current ? { ...current, role: event.target.value } : current)} /></label>
+                    <label className="field-label form-span"><span>Routing hints (comma-separated)</span><input value={addBrain.routingHints} onChange={(event) => setAddBrain((current) => current ? { ...current, routingHints: event.target.value } : current)} placeholder="life, planning, personal" /></label>
+                    <label className="field-label"><span>Egress</span><select value={addBrain.egressPolicy} onChange={(event) => setAddBrain((current) => current ? { ...current, egressPolicy: event.target.value } : current)}><option value="local_only">Local only</option><option value="cloud_allowed">Cloud allowed · preview every turn</option></select></label>
+                    <label className="field-label"><span>Writes</span><select value={addBrain.writePolicy} onChange={(event) => setAddBrain((current) => current ? { ...current, writePolicy: event.target.value } : current)}><option value="confirm_every_write">Confirm every write</option><option value="readonly">Read only</option></select></label>
+                  </div>
+                  <label className="toggle-row"><input type="checkbox" checked={addBrain.graphEnabled} onChange={(event) => setAddBrain((current) => current ? { ...current, graphEnabled: event.target.checked } : current)} /><span><strong>Include safe metadata in Brain Map</strong><small>Private and explicit-only notes stay excluded.</small></span></label>
+                  <div className="consent-actions"><button type="button" className="secondary-action" onClick={() => setAddBrain(null)}>Cancel</button><button className="primary-action" type="submit">Register brain</button></div>
+                </form>
+              )}
+            </section>
+
+            <section className="settings-card write-surface">
+              <div className="settings-card__heading"><div><p className="section-label">Confirmed note update</p><h2>Draft, review, then write.</h2><p>Kairos only creates or edits Markdown inside an explicitly enabled brain directory. It never deletes or moves notes.</p></div><StatusPill tone="warning">CONFIRM</StatusPill></div>
+              {!writeProposal ? (
+                writableBrains.length === 0 ? (
+                  <div className="write-policy-empty" role="status"><strong>No writable brain is enabled.</strong><span>Notes stay safe: set a registered brain to <em>Confirm every write</em> in its policy before Kairos can prepare a bounded diff.</span></div>
+                ) : (
+                <div className="form-grid write-form">
+                  <label className="field-label"><span>Brain</span><select value={writeDraft.brainId} onChange={(event) => setWriteDraft((current) => ({ ...current, brainId: event.target.value }))}>{writableBrains.map((brain) => <option key={brain.id} value={brain.id}>{brain.name}</option>)}</select></label>
+                  <label className="field-label"><span>Operation</span><select value={writeDraft.kind} onChange={(event) => setWriteDraft((current) => ({ ...current, kind: event.target.value as "create" | "edit" }))}><option value="create">Create note</option><option value="edit">Edit note</option></select></label>
+                  <label className="field-label form-span"><span>Relative Markdown path</span><input value={writeDraft.relativePath} onChange={(event) => setWriteDraft((current) => ({ ...current, relativePath: event.target.value }))} placeholder="02_Projects/Kairos/Capture.md" /></label>
+                  <label className="field-label form-span"><span>Proposed Markdown</span><textarea value={writeDraft.markdown} onChange={(event) => setWriteDraft((current) => ({ ...current, markdown: event.target.value }))} rows={7} placeholder="# Note title&#10;&#10;Your approved update…" /></label>
+                  <div className="consent-actions form-span"><button className="secondary-action" onClick={() => void previewNoteWrite()} disabled={writeBusy || !writeDraft.markdown.trim() || !nativeRuntime}>{writeBusy ? "Preparing…" : "Preview diff"}</button></div>
+                </div>
+                )
+              ) : (
+                <div className="write-preview">
+                  <div className="provider-boundary"><strong>{writeProposal.kind === "create" ? "Create" : "Edit"} {writeProposal.relativePath}</strong><span>Review this bounded diff carefully. It expires at {shortDate(writeProposal.expiresAt) ?? "soon"}; confirmation rechecks for conflicts.</span></div>
+                  <pre className="write-diff">{writeProposal.diff}</pre>
+                  <div className="consent-actions"><button className="secondary-action" onClick={() => setWriteProposal(null)} disabled={writeBusy}>Cancel</button><button className="primary-action" onClick={() => void confirmNoteWrite()} disabled={writeBusy}>{writeBusy ? "Saving…" : "Confirm write"}</button></div>
+                </div>
+              )}
+              {writeFeedback && <p className="settings-feedback">{writeFeedback}</p>}
+            </section>
           </section>
         )}
       </section>

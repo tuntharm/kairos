@@ -25,6 +25,7 @@ pub struct AccessGrant {
 pub enum ContentDestination {
     LocalOllama,
     ExternalMcp,
+    ExternalCloud,
 }
 
 fn normalized_relative_path(path: &str) -> Result<PathBuf> {
@@ -185,8 +186,8 @@ pub fn evaluate_access(
 }
 
 /// Enforce the registered brain's egress rule before note contents leave the
-/// local Kairos process. MCP has no trustworthy way to establish per-turn user
-/// consent in this alpha, so callers must pass `false` for it.
+/// local Kairos process. External callers must establish a per-turn consent
+/// record before passing `true`.
 pub fn enforce_content_egress(
     config: &KairosConfig,
     route: &RouteResult,
@@ -206,7 +207,7 @@ pub fn enforce_content_egress(
         match brain.egress_policy {
             EgressPolicy::LocalOnly => {
                 return Err(CoreError::PolicyDenied(
-                    "a local_only brain cannot send note contents through an external MCP host"
+                    "a local_only brain cannot send note contents to an external provider"
                         .to_owned(),
                 ));
             }
@@ -276,6 +277,7 @@ mod tests {
             root_path: std::env::temp_dir(),
             router_paths: Vec::new(),
             context_paths: Vec::new(),
+            routing_hints: Vec::new(),
             enabled: true,
             read_policy: ReadPolicy {
                 explicit_only_patterns: vec!["90_Private/**".to_owned()],
@@ -284,6 +286,8 @@ mod tests {
             },
             egress_policy: EgressPolicy::LocalOnly,
             write_policy: WritePolicy::ReadOnly,
+            write_directories: Vec::new(),
+            graph_enabled: true,
         }
     }
 
@@ -336,6 +340,9 @@ mod tests {
             version: 1,
             source_router_path: std::env::temp_dir().join("router.md"),
             local_model: LocalModelSettings::default(),
+            app: crate::AppSettings::default(),
+            inference: crate::InferenceSettings::default(),
+            local_setup: crate::LocalSetupSettings::default(),
             brains: vec![brain],
         };
         let route = RouteResult {
