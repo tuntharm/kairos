@@ -27,16 +27,18 @@ use kairos_core::{
     AccessDisposition, AppSettings, BrainRecord, BrainRole, BriefAnswer, CROSS_BRAIN_PULSE_QUERY,
     ChatAnswer, ConfirmedNoteWrite, ContentDestination, ContextPack, ConversationTurn,
     EgressPolicy, GraphBrainSource, GraphBuildOptions, GraphCluster, GraphDiagnostic, GraphIndex,
-    GraphNode, InferenceSettings, KairosConfig, LocalModelChoice, LocalModelSettings,
-    LocalSetupSettings, NoteWriteConfirmation, NoteWriteKind, NoteWriteProposal, NoteWriteRequest,
+    GraphNode, InferenceSettings, KairosConfig, LocalModelChoice, LocalModelFitAssessment,
+    LocalModelProfile, LocalModelSettings, LocalSetupSettings, MEMORY_BUDGET_PRESETS_GB,
+    MemoryBudgetMode, NoteWriteConfirmation, NoteWriteKind, NoteWriteProposal, NoteWriteRequest,
     OllamaPullProgress, ProviderConfig, ProviderKind, SummonTarget, WritePolicy,
-    WriteProposalOptions, WriteProposalStore, build_context, build_graph_index,
-    canonicalize_allowed_file, chat_with_anthropic_api, chat_with_claude_cli, chat_with_codex_cli,
-    chat_with_ollama, chat_with_openai_api, default_brain_read_policy, default_config_path,
-    default_tharm_config, enforce_content_egress, evaluate_access, load_or_migrate_config,
-    local_model_choices, ollama_status, preflight_retrieval_access,
-    pull_ollama_model as pull_model_from_ollama, render_chat_prompt, stream_chat_with_ollama,
-    synthesize_ollama, test_ollama_model as test_local_ollama_model, write_config,
+    WriteProposalOptions, WriteProposalStore, assess_local_model_fit, build_context,
+    build_graph_index, canonicalize_allowed_file, chat_with_anthropic_api, chat_with_claude_cli,
+    chat_with_codex_cli, chat_with_ollama, chat_with_openai_api, default_brain_read_policy,
+    default_config_path, default_tharm_config, enforce_content_egress, evaluate_access,
+    load_or_migrate_config, local_model_choices, local_model_profiles, ollama_status,
+    preflight_retrieval_access, pull_ollama_model as pull_model_from_ollama, render_chat_prompt,
+    stream_chat_with_ollama, synthesize_ollama, test_ollama_model as test_local_ollama_model,
+    write_config,
 };
 
 const KEYCHAIN_SERVICE: &str = "com.tharm.kairos";
@@ -99,6 +101,7 @@ struct ModelStatus {
     installed_models: Vec<String>,
     setup_message: Option<String>,
     choices: Vec<LocalModelChoice>,
+    selected_model_fit: LocalModelFitAssessment,
 }
 
 #[derive(Serialize)]
@@ -116,8 +119,16 @@ struct LocalSetupStatus {
     endpoint: String,
     detected_memory_gb: Option<u16>,
     available_disk_gb: Option<u64>,
+    context_window_tokens: u32,
+    memory_budget_mode: MemoryBudgetMode,
+    memory_budget_gb: Option<u16>,
+    effective_memory_budget_gb: Option<u16>,
+    memory_budget_message: String,
+    memory_budget_planning_only: bool,
     selected_model_installed: bool,
     setup_message: Option<String>,
+    ollama_install_action: OllamaInstallAction,
+    selected_model_fit: LocalModelFitAssessment,
     models: Vec<LocalSetupModel>,
 }
 
@@ -126,10 +137,34 @@ struct LocalSetupStatus {
 struct LocalSetupModel {
     id: String,
     label: String,
+    role: String,
     installed: bool,
     download_size: String,
     memory_band: String,
     recommended_context: String,
+    fit: LocalModelFitAssessment,
+}
+
+/// The selected local-model planning budget. It is intentionally distinct
+/// from detected hardware and never changes macOS/Ollama allocation by itself.
+#[derive(Clone)]
+struct MemoryBudgetStatus {
+    mode: MemoryBudgetMode,
+    configured_gb: Option<u16>,
+    effective_gb: Option<u16>,
+    planning_only: bool,
+    message: String,
+}
+
+/// A typed, fixed action for the setup UI—not a user-provided URL or shell
+/// command. macOS still owns the user-approved app installation.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OllamaInstallAction {
+    command: String,
+    label: String,
+    official_url: String,
+    needed: bool,
 }
 
 #[derive(Serialize)]
@@ -279,8 +314,51 @@ fn load_or_create_config() -> Result<(PathBuf, KairosConfig), String> {
     Ok((path, config))
 }
 
-async fn model_status(settings: &LocalModelSettings) -> ModelStatus {
+fn memory_budget_status(
+    settings: &LocalSetupSettings,
+    detected_memory_gb: Option<u16>,
+) -> MemoryBudgetStatus {
+    let mode = settings.resolved_memory_budget_mode();
+    let configured_gb = match &mode {
+        MemoryBudgetMode::Auto => None,
+        MemoryBudgetMode::Preset | MemoryBudgetMode::Custom => settings.memory_budget_gb,
+    };
+    let effective_gb = settings.effective_memory_budget_gb(detected_memory_gb);
+    let message = match (mode.clone(), configured_gb, detected_memory_gb) {
+        (MemoryBudgetMode::Auto, _, Some(detected)) => format!(
+            "Auto uses {detected} GB detected on this Mac. It is planning guidance only: Kairos does not reserve memory or change Ollama's allocation."
+        ),
+        (MemoryBudgetMode::Auto, _, None) => {
+            "Auto is waiting to detect memory. It will not change the selected model or context."
+                .to_owned()
+        }
+        (_, Some(selected), Some(detected)) if selected > detected => format!(
+            "The {selected} GB planning budget is above {detected} GB detected on this Mac. It does not add memory or change Ollama; use it only to compare model tiers."
+        ),
+        (_, Some(selected), Some(detected)) => format!(
+            "Using your {selected} GB planning budget while {detected} GB is detected. It does not reserve or cap memory, switch models, or lower context."
+        ),
+        (_, Some(selected), None) => format!(
+            "Using your {selected} GB planning budget. It does not reserve or cap memory, switch models, or lower context."
+        ),
+        _ => "Memory budget needs attention before Kairos can assess local-model fit.".to_owned(),
+    };
+    MemoryBudgetStatus {
+        mode,
+        configured_gb,
+        effective_gb,
+        planning_only: true,
+        message,
+    }
+}
+
+async fn model_status(
+    settings: &LocalModelSettings,
+    local_setup: &LocalSetupSettings,
+    detected_memory_gb: Option<u16>,
+) -> ModelStatus {
     let readiness = ollama_status(settings).await;
+    let memory_budget = memory_budget_status(local_setup, detected_memory_gb);
     ModelStatus {
         endpoint: readiness.endpoint,
         selected_model: readiness.selected_model,
@@ -291,6 +369,11 @@ async fn model_status(settings: &LocalModelSettings) -> ModelStatus {
         installed_models: readiness.installed_models,
         setup_message: readiness.setup_message,
         choices: local_model_choices(&settings.selected_model),
+        selected_model_fit: assess_local_model_fit(
+            &settings.selected_model,
+            memory_budget.effective_gb,
+            settings.context_window_tokens,
+        ),
     }
 }
 
@@ -306,10 +389,20 @@ async fn status() -> Result<AppStatus, String> {
         .as_ref()
         .map(|config| config.local_model.clone())
         .unwrap_or_default();
+    let local_setup = config
+        .as_ref()
+        .map(|config| config.local_setup.clone())
+        .unwrap_or_default();
+    let capability = system::machine_capability();
     Ok(AppStatus {
         config_path: path.display().to_string(),
         initialized,
-        model: model_status(&settings).await,
+        model: model_status(
+            &settings,
+            &local_setup,
+            capability.detected_memory_budget_gib,
+        )
+        .await,
         app: config
             .as_ref()
             .map(|config| config.app.clone())
@@ -322,76 +415,91 @@ async fn status() -> Result<AppStatus, String> {
     })
 }
 
-fn profile_specs() -> [(&'static str, &'static str, &'static str, &'static str); 4] {
-    [
-        (
-            "qwen3.6:35b-mlx",
-            "Qwen 3.6 35B MLX",
-            "Power · 48 GB+ recommended",
-            "32K context target",
-        ),
-        (
-            "qwen3:8b",
-            "Qwen 3 8B",
-            "Light · 16 GB+ recommended",
-            "32K context target",
-        ),
-        (
-            "gpt-oss:20b",
-            "GPT-OSS 20B",
-            "Balanced · 32 GB+ recommended",
-            "32K context target",
-        ),
-        (
-            "glm-4.7-flash",
-            "GLM 4.7 Flash",
-            "Balanced · 32 GB+ recommended",
-            "32K context target",
-        ),
-    ]
-}
-
-fn friendly_model_size(size_bytes: Option<u64>, model: &str) -> String {
+fn friendly_model_size(size_bytes: Option<u64>, profile: &LocalModelProfile) -> String {
     if let Some(bytes) = size_bytes {
         let gib = bytes as f64 / 1024_f64.powi(3);
         return format!("{gib:.1} GB installed");
     }
-    match model {
-        "qwen3.6:35b-mlx" => "~21 GB via Ollama".to_owned(),
-        "qwen3:8b" => "~5.2 GB via Ollama".to_owned(),
-        "glm-4.7-flash" => "~19 GB via Ollama".to_owned(),
-        _ => "Size reported by Ollama during download".to_owned(),
+    match profile.package_size_bytes {
+        Some(bytes) => {
+            let gb = bytes as f64 / 1_000_000_000_f64;
+            if (gb - gb.round()).abs() < f64::EPSILON {
+                format!("~{} GB via Ollama", gb.round())
+            } else {
+                format!("~{gb:.1} GB via Ollama")
+            }
+        }
+        None => "Size reported by Ollama during download".to_owned(),
+    }
+}
+
+fn friendly_context_window(tokens: u32) -> String {
+    if tokens.is_multiple_of(1024) {
+        format!("{}K", tokens / 1024)
+    } else if tokens.is_multiple_of(1_000) {
+        format!("{}K", tokens / 1_000)
+    } else {
+        format!("{tokens} tokens")
     }
 }
 
 async fn local_setup() -> Result<LocalSetupStatus, String> {
     let path = config_path()?;
-    let settings = if path.exists() {
-        load_app_config(&path)?.local_model
+    let (settings, setup_settings) = if path.exists() {
+        let config = load_app_config(&path)?;
+        (config.local_model, config.local_setup)
     } else {
-        LocalModelSettings::default()
+        (LocalModelSettings::default(), LocalSetupSettings::default())
     };
     let readiness = ollama_status(&settings).await;
     let capability = system::machine_capability();
+    let memory_budget =
+        memory_budget_status(&setup_settings, capability.detected_memory_budget_gib);
     let installed_sizes = readiness
         .installed_model_sizes
         .iter()
         .map(|model| (model.id.as_str(), model.size_bytes))
         .collect::<HashMap<_, _>>();
-    let models = profile_specs()
+    let models = local_model_profiles()
         .into_iter()
-        .map(|(id, label, memory_band, context)| {
-            let resolved = readiness
-                .installed_models
-                .iter()
-                .any(|installed| installed == id || installed == &format!("{id}:latest"));
+        .map(|profile| {
+            let resolved = readiness.installed_models.iter().any(|installed| {
+                installed == &profile.id || installed == &format!("{}:latest", profile.id)
+            });
+            let fit = assess_local_model_fit(
+                &profile.id,
+                memory_budget.effective_gb,
+                settings.context_window_tokens,
+            );
             LocalSetupModel {
-                id: id.to_owned(),
-                label: label.to_owned(),
+                id: profile.id.clone(),
+                label: profile.label.clone(),
+                role: profile.role.clone(),
                 installed: resolved,
-                download_size: friendly_model_size(installed_sizes.get(id).copied().flatten(), id),
-                memory_band: memory_band.to_owned(),
-                recommended_context: context.to_owned(),
+                download_size: friendly_model_size(
+                    installed_sizes.get(profile.id.as_str()).copied().flatten(),
+                    &profile,
+                ),
+                memory_band: format!(
+                    "{} GB minimum · {} GB recommended",
+                    profile.minimum_memory_gb, profile.recommended_memory_gb
+                ),
+                recommended_context: profile
+                    .maximum_context_tokens
+                    .map(|maximum| {
+                        format!(
+                            "Up to {} · Kairos set to {}",
+                            friendly_context_window(maximum),
+                            friendly_context_window(settings.context_window_tokens)
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        format!(
+                            "Kairos set to {}",
+                            friendly_context_window(settings.context_window_tokens)
+                        )
+                    }),
+                fit,
             }
         })
         .collect();
@@ -413,8 +521,25 @@ async fn local_setup() -> Result<LocalSetupStatus, String> {
         available_disk_gb: capability
             .free_disk_bytes
             .map(|bytes| bytes / 1024_u64.pow(3)),
+        context_window_tokens: settings.context_window_tokens,
+        memory_budget_mode: memory_budget.mode,
+        memory_budget_gb: memory_budget.configured_gb,
+        effective_memory_budget_gb: memory_budget.effective_gb,
+        memory_budget_message: memory_budget.message,
+        memory_budget_planning_only: memory_budget.planning_only,
         selected_model_installed: readiness.selected_model_installed,
         setup_message,
+        ollama_install_action: OllamaInstallAction {
+            command: "open_ollama_install_page".to_owned(),
+            label: "Install Ollama".to_owned(),
+            official_url: system::OLLAMA_MACOS_DOWNLOAD_URL.to_owned(),
+            needed: !ollama_installed,
+        },
+        selected_model_fit: assess_local_model_fit(
+            &settings.selected_model,
+            memory_budget.effective_gb,
+            settings.context_window_tokens,
+        ),
         models,
     })
 }
@@ -426,6 +551,24 @@ async fn app_status() -> Result<AppStatus, String> {
 
 #[tauri::command]
 async fn local_setup_status() -> Result<LocalSetupStatus, String> {
+    local_setup().await
+}
+
+/// Persist only the local-model planning budget, then return a fresh fit
+/// assessment. This deliberately avoids saving an unrelated shortcut,
+/// provider, or context-window draft when the user changes a single selector.
+#[tauri::command]
+async fn set_memory_budget(
+    memory_budget_mode: MemoryBudgetMode,
+    memory_budget_gb: Option<u16>,
+) -> Result<LocalSetupStatus, String> {
+    let (path, mut config) = load_or_create_config()?;
+    config
+        .local_setup
+        .set_memory_budget(memory_budget_mode, memory_budget_gb)
+        .map_err(|error| error.to_string())?;
+    config.ensure_current_version();
+    write_config(&path, &config, true).map_err(|error| error.to_string())?;
     local_setup().await
 }
 
@@ -457,7 +600,7 @@ async fn pull_ollama_model(
     state: State<'_, AppState>,
     model: String,
 ) -> Result<LocalSetupStatus, String> {
-    let (path, mut config) = load_or_create_config()?;
+    let (_path, config) = load_or_create_config()?;
     state
         .cancelled_pulls
         .lock()
@@ -483,12 +626,9 @@ async fn pull_ollama_model(
     })
     .await
     .map_err(|error| error.to_string())?;
-    config
-        .local_model
-        .set_selected_model(&model)
-        .map_err(|error| error.to_string())?;
-    config.ensure_current_version();
-    write_config(&path, &config, true).map_err(|error| error.to_string())?;
+    // Downloading is intentionally not a model-selection action. The caller
+    // must invoke `set_selected_model` explicitly after inspecting the fit and
+    // test result; there is no silent fallback or automatic activation.
     local_setup().await
 }
 
@@ -1203,6 +1343,7 @@ fn rebind_shortcut(app: &AppHandle, desired: Shortcut, previous: &str) -> Result
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Tauri maps the established flat WebView payload by name.
 async fn save_app_preferences(
     app: AppHandle,
     shortcut: String,
@@ -1211,6 +1352,7 @@ async fn save_app_preferences(
     close_to_hide: bool,
     context_window_tokens: u32,
     memory_budget_gb: Option<u16>,
+    memory_budget_mode: Option<MemoryBudgetMode>,
 ) -> Result<AppStatus, String> {
     let (path, mut config) = load_or_create_config()?;
     let (shortcut, parsed_shortcut) = normalise_shortcut(&shortcut)?;
@@ -1219,11 +1361,17 @@ async fn save_app_preferences(
         "last-page" | "last_surface" => SummonTarget::LastSurface,
         _ => return Err("Choose Compact chat or Last open page.".to_owned()),
     };
-    if let Some(memory_budget_gb) = memory_budget_gb
-        && !(1..=192).contains(&memory_budget_gb)
-    {
-        return Err("Choose a memory budget between 1 GB and 192 GB.".to_owned());
-    }
+    // Older WebViews send only `memoryBudgetGb`; preserve their meaning while
+    // new callers round-trip the explicit Auto / Preset / Custom mode.
+    let memory_budget_mode = memory_budget_mode.unwrap_or_else(|| match memory_budget_gb {
+        None => MemoryBudgetMode::Auto,
+        Some(budget) if MEMORY_BUDGET_PRESETS_GB.contains(&budget) => MemoryBudgetMode::Preset,
+        Some(_) => MemoryBudgetMode::Custom,
+    });
+    config
+        .local_setup
+        .set_memory_budget(memory_budget_mode, memory_budget_gb)
+        .map_err(|error| error.to_string())?;
     let previous_shortcut = config.app.summon_shortcut.clone();
     let previous_settings = config.local_model.clone();
     config.local_model.context_window_tokens = context_window_tokens;
@@ -1247,7 +1395,6 @@ async fn save_app_preferences(
         launch_at_login,
         close_to_hide,
     };
-    config.local_setup = LocalSetupSettings { memory_budget_gb };
     config.ensure_current_version();
     if let Err(error) = write_config(&path, &config, true) {
         config.local_model = previous_settings;
@@ -1937,6 +2084,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_status,
             local_setup_status,
+            set_memory_budget,
             initialize_tharm_profile,
             set_selected_model,
             pull_ollama_model,

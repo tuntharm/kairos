@@ -39,6 +39,10 @@ pub const FAST_ROUTER_MODEL: &str = "qwen3:8b";
 pub const OPTIONAL_LOCAL_MODELS: [&str; 2] = ["gpt-oss:20b", "glm-4.7-flash"];
 pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 32_768;
 pub const CURRENT_CONFIG_VERSION: u32 = 3;
+/// The explicit values offered by Kairos's macOS local-model setup. These are
+/// planning budgets, not a claim about installed physical RAM and not a
+/// resource limit applied to Ollama.
+pub const MEMORY_BUDGET_PRESETS_GB: [u16; 7] = [16, 24, 32, 48, 64, 96, 192];
 
 static NEXT_TEMPORARY_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -184,13 +188,111 @@ fn default_provider_configs() -> Vec<ProviderConfig> {
     ]
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryBudgetMode {
+    #[default]
+    Auto,
+    Preset,
+    Custom,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalSetupSettings {
     /// `None` means automatic detection. A number is a chosen memory budget,
     /// not a statement about the physical memory installed in a Mac.
     #[serde(default)]
     pub memory_budget_gb: Option<u16>,
+    /// Kept separately so a custom value such as `48 GB` remains custom when
+    /// it happens to equal one of the preset values. The explicit mode also
+    /// lets the WebView restore Auto faithfully after an app restart.
+    #[serde(default)]
+    pub memory_budget_mode: MemoryBudgetMode,
+}
+
+impl Default for LocalSetupSettings {
+    fn default() -> Self {
+        Self {
+            memory_budget_gb: None,
+            memory_budget_mode: MemoryBudgetMode::Auto,
+        }
+    }
+}
+
+impl LocalSetupSettings {
+    /// Older v3 alpha builds stored only `memoryBudgetGb`. Infer a mode when
+    /// reading such a file so the user's existing choice continues to work;
+    /// the next deliberate save writes the explicit mode.
+    pub fn resolved_memory_budget_mode(&self) -> MemoryBudgetMode {
+        if self.memory_budget_mode == MemoryBudgetMode::Auto && self.memory_budget_gb.is_some() {
+            if self
+                .memory_budget_gb
+                .is_some_and(|budget| MEMORY_BUDGET_PRESETS_GB.contains(&budget))
+            {
+                MemoryBudgetMode::Preset
+            } else {
+                MemoryBudgetMode::Custom
+            }
+        } else {
+            self.memory_budget_mode.clone()
+        }
+    }
+
+    pub fn effective_memory_budget_gb(&self, detected_memory_gb: Option<u16>) -> Option<u16> {
+        match self.resolved_memory_budget_mode() {
+            MemoryBudgetMode::Auto => detected_memory_gb,
+            MemoryBudgetMode::Preset | MemoryBudgetMode::Custom => self.memory_budget_gb,
+        }
+    }
+
+    pub fn set_memory_budget(
+        &mut self,
+        mode: MemoryBudgetMode,
+        memory_budget_gb: Option<u16>,
+    ) -> Result<()> {
+        match mode {
+            MemoryBudgetMode::Auto => {
+                if memory_budget_gb.is_some() {
+                    return Err(CoreError::InvalidPath(
+                        "Auto memory budget cannot include a manual GB value".to_owned(),
+                    ));
+                }
+            }
+            MemoryBudgetMode::Preset => {
+                let Some(memory_budget_gb) = memory_budget_gb else {
+                    return Err(CoreError::InvalidPath(
+                        "Choose one of Kairos's memory-budget presets".to_owned(),
+                    ));
+                };
+                if !MEMORY_BUDGET_PRESETS_GB.contains(&memory_budget_gb) {
+                    return Err(CoreError::InvalidPath(format!(
+                        "Choose one of Kairos's memory-budget presets: {} GB",
+                        MEMORY_BUDGET_PRESETS_GB
+                            .iter()
+                            .map(u16::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )));
+                }
+            }
+            MemoryBudgetMode::Custom => {
+                let Some(memory_budget_gb) = memory_budget_gb else {
+                    return Err(CoreError::InvalidPath(
+                        "Enter a custom memory budget between 1 GB and 192 GB".to_owned(),
+                    ));
+                };
+                if !(1..=192).contains(&memory_budget_gb) {
+                    return Err(CoreError::InvalidPath(
+                        "Choose a custom memory budget between 1 GB and 192 GB".to_owned(),
+                    ));
+                }
+            }
+        }
+        self.memory_budget_mode = mode;
+        self.memory_budget_gb = memory_budget_gb;
+        Ok(())
+    }
 }
 
 fn default_ollama_endpoint() -> String {
@@ -271,31 +373,358 @@ pub struct LocalModelChoice {
     pub role: String,
 }
 
+/// Fixed, transparent metadata for the deliberately small alpha catalog.
+/// `minimum_memory_gb` and `recommended_memory_gb` are Kairos fit guidance
+/// for the 32K target (including practical macOS headroom), not vendor
+/// hardware guarantees. Ollama reports the actual installed package size at
+/// runtime and takes precedence over `package_size_bytes` in the desktop UI.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalModelProfile {
+    pub id: String,
+    pub label: String,
+    pub role: String,
+    pub package_size_bytes: Option<u64>,
+    pub minimum_memory_gb: u16,
+    pub recommended_memory_gb: u16,
+    pub maximum_context_tokens: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalModelFit {
+    Recommended,
+    Tight,
+    NotRecommended,
+    Unknown,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalModelFitAssessment {
+    pub fit: LocalModelFit,
+    pub budget_gb: Option<u16>,
+    pub minimum_memory_gb: Option<u16>,
+    pub recommended_memory_gb: Option<u16>,
+    pub context_window_tokens: u32,
+    pub maximum_context_tokens: Option<u32>,
+    pub context_compatible: Option<bool>,
+    /// A fit estimate is deliberately not treated as proof of real-world
+    /// performance. Large / newer packages expose this so the UI can ask for
+    /// the explicit local model test before presenting them as ready.
+    pub requires_test: bool,
+    pub message: String,
+}
+
+#[derive(Clone, Copy)]
+struct LocalModelProfileSpec {
+    id: &'static str,
+    label: &'static str,
+    role: &'static str,
+    package_size_bytes: u64,
+    minimum_memory_gb: u16,
+    recommended_memory_gb: u16,
+    maximum_context_tokens: u32,
+    requires_test: bool,
+}
+
+const LOCAL_MODEL_PROFILE_SPECS: [LocalModelProfileSpec; 14] = [
+    LocalModelProfileSpec {
+        id: FAST_ROUTER_MODEL,
+        label: "Qwen 3 8B",
+        role: "Fast chat, routing, and summaries",
+        package_size_bytes: 5_200_000_000,
+        minimum_memory_gb: 16,
+        recommended_memory_gb: 16,
+        maximum_context_tokens: 40_000,
+        requires_test: false,
+    },
+    LocalModelProfileSpec {
+        id: "gemma3:12b",
+        label: "Gemma 3 12B",
+        role: "Documents and vision-capable general assistant",
+        package_size_bytes: 8_100_000_000,
+        minimum_memory_gb: 24,
+        recommended_memory_gb: 24,
+        maximum_context_tokens: 131_072,
+        requires_test: false,
+    },
+    LocalModelProfileSpec {
+        id: "qwen3:14b",
+        label: "Qwen 3 14B",
+        role: "Everyday reasoning with more headroom than 8B",
+        package_size_bytes: 9_300_000_000,
+        minimum_memory_gb: 24,
+        recommended_memory_gb: 24,
+        maximum_context_tokens: 40_000,
+        requires_test: false,
+    },
+    LocalModelProfileSpec {
+        id: OPTIONAL_LOCAL_MODELS[0],
+        label: "GPT-OSS 20B",
+        role: "Reasoning, structured work, and tools",
+        package_size_bytes: 14_000_000_000,
+        minimum_memory_gb: 24,
+        recommended_memory_gb: 24,
+        maximum_context_tokens: 131_072,
+        requires_test: false,
+    },
+    LocalModelProfileSpec {
+        id: "qwen3.6:27b",
+        label: "Qwen 3.6 27B",
+        role: "Stronger local general and vision-capable work",
+        package_size_bytes: 17_000_000_000,
+        minimum_memory_gb: 32,
+        recommended_memory_gb: 32,
+        maximum_context_tokens: 262_144,
+        requires_test: false,
+    },
+    LocalModelProfileSpec {
+        id: "mistral-small3.2:24b",
+        label: "Mistral Small 3.2 24B",
+        role: "Tool calling, documents, and agent workflows",
+        package_size_bytes: 15_000_000_000,
+        minimum_memory_gb: 32,
+        recommended_memory_gb: 32,
+        maximum_context_tokens: 131_072,
+        requires_test: false,
+    },
+    LocalModelProfileSpec {
+        id: "gemma3:27b",
+        label: "Gemma 3 27B",
+        role: "Higher-quality documents and vision",
+        package_size_bytes: 17_000_000_000,
+        minimum_memory_gb: 32,
+        recommended_memory_gb: 32,
+        maximum_context_tokens: 131_072,
+        requires_test: false,
+    },
+    LocalModelProfileSpec {
+        id: "qwen3:30b",
+        label: "Qwen 3 30B",
+        role: "Research synthesis and reasoning",
+        package_size_bytes: 19_000_000_000,
+        minimum_memory_gb: 32,
+        recommended_memory_gb: 32,
+        maximum_context_tokens: 262_144,
+        requires_test: false,
+    },
+    LocalModelProfileSpec {
+        id: "qwen3:32b",
+        label: "Qwen 3 32B",
+        role: "Higher-quality dense reasoning",
+        package_size_bytes: 20_000_000_000,
+        minimum_memory_gb: 48,
+        recommended_memory_gb: 48,
+        maximum_context_tokens: 40_000,
+        requires_test: false,
+    },
+    LocalModelProfileSpec {
+        id: DEFAULT_LOCAL_MODEL,
+        label: "Qwen 3.6 35B MLX",
+        role: "Default local model",
+        package_size_bytes: 22_000_000_000,
+        minimum_memory_gb: 32,
+        recommended_memory_gb: 48,
+        maximum_context_tokens: 262_144,
+        requires_test: false,
+    },
+    LocalModelProfileSpec {
+        id: OPTIONAL_LOCAL_MODELS[1],
+        label: "GLM 4.7 Flash",
+        role: "Local agent and coding model",
+        package_size_bytes: 19_000_000_000,
+        minimum_memory_gb: 32,
+        recommended_memory_gb: 32,
+        maximum_context_tokens: 198_000,
+        requires_test: true,
+    },
+    LocalModelProfileSpec {
+        id: "llama3.3:70b",
+        label: "Llama 3.3 70B",
+        role: "Heavy general-purpose assistant",
+        package_size_bytes: 43_000_000_000,
+        minimum_memory_gb: 64,
+        recommended_memory_gb: 64,
+        maximum_context_tokens: 131_072,
+        requires_test: true,
+    },
+    LocalModelProfileSpec {
+        id: "gpt-oss:120b",
+        label: "GPT-OSS 120B",
+        role: "High-end local reasoning",
+        package_size_bytes: 65_000_000_000,
+        minimum_memory_gb: 96,
+        recommended_memory_gb: 96,
+        maximum_context_tokens: 131_072,
+        requires_test: true,
+    },
+    LocalModelProfileSpec {
+        id: "qwen3:235b",
+        label: "Qwen 3 235B",
+        role: "Workstation / server-scale deployment",
+        package_size_bytes: 142_000_000_000,
+        minimum_memory_gb: 192,
+        recommended_memory_gb: 192,
+        maximum_context_tokens: 262_144,
+        requires_test: true,
+    },
+];
+
+fn local_model_profile_spec(model: &str) -> Option<LocalModelProfileSpec> {
+    LOCAL_MODEL_PROFILE_SPECS
+        .iter()
+        .copied()
+        .find(|profile| profile.id == model.trim())
+}
+
+fn profile_from_spec(profile: LocalModelProfileSpec) -> LocalModelProfile {
+    LocalModelProfile {
+        id: profile.id.to_owned(),
+        label: profile.label.to_owned(),
+        role: profile.role.to_owned(),
+        package_size_bytes: Some(profile.package_size_bytes),
+        minimum_memory_gb: profile.minimum_memory_gb,
+        recommended_memory_gb: profile.recommended_memory_gb,
+        maximum_context_tokens: Some(profile.maximum_context_tokens),
+    }
+}
+
+pub fn local_model_profiles() -> Vec<LocalModelProfile> {
+    LOCAL_MODEL_PROFILE_SPECS
+        .iter()
+        .copied()
+        .map(profile_from_spec)
+        .collect()
+}
+
+pub fn local_model_profile(model: &str) -> Option<LocalModelProfile> {
+    local_model_profile_spec(model).map(profile_from_spec)
+}
+
+/// Assess only the user-selected model. This never replaces the selected
+/// model, changes the context window, or sends anything to a provider.
+pub fn assess_local_model_fit(
+    model: &str,
+    memory_budget_gb: Option<u16>,
+    context_window_tokens: u32,
+) -> LocalModelFitAssessment {
+    let Some(profile) = local_model_profile_spec(model) else {
+        return LocalModelFitAssessment {
+            fit: LocalModelFit::Unknown,
+            budget_gb: memory_budget_gb,
+            minimum_memory_gb: None,
+            recommended_memory_gb: None,
+            context_window_tokens,
+            maximum_context_tokens: None,
+            context_compatible: None,
+            requires_test: true,
+            message: format!(
+                "Kairos has no catalog fit estimate for `{}`. It will keep your selected model and {}K context unchanged.",
+                model.trim(),
+                context_window_tokens / 1024
+            ),
+        };
+    };
+
+    let context_compatible = context_window_tokens <= profile.maximum_context_tokens;
+    if !context_compatible {
+        return LocalModelFitAssessment {
+            fit: LocalModelFit::NotRecommended,
+            budget_gb: memory_budget_gb,
+            minimum_memory_gb: Some(profile.minimum_memory_gb),
+            recommended_memory_gb: Some(profile.recommended_memory_gb),
+            context_window_tokens,
+            maximum_context_tokens: Some(profile.maximum_context_tokens),
+            context_compatible: Some(false),
+            requires_test: false,
+            message: format!(
+                "{} is catalogued for up to {}K context, below the current {}K request. Kairos will not lower the context or switch models automatically.",
+                profile.label,
+                profile.maximum_context_tokens / 1024,
+                context_window_tokens / 1024
+            ),
+        };
+    }
+
+    let Some(memory_budget_gb) = memory_budget_gb else {
+        return LocalModelFitAssessment {
+            fit: LocalModelFit::Unknown,
+            budget_gb: None,
+            minimum_memory_gb: Some(profile.minimum_memory_gb),
+            recommended_memory_gb: Some(profile.recommended_memory_gb),
+            context_window_tokens,
+            maximum_context_tokens: Some(profile.maximum_context_tokens),
+            context_compatible: Some(true),
+            requires_test: profile.requires_test,
+            message: format!(
+                "Waiting for a memory budget to assess {} at {}K context. Kairos will not change the selected model or context.",
+                profile.label,
+                context_window_tokens / 1024
+            ),
+        };
+    };
+
+    let (fit, message) = if memory_budget_gb < profile.minimum_memory_gb {
+        (
+            LocalModelFit::NotRecommended,
+            format!(
+                "Not recommended at {memory_budget_gb} GB: Kairos's 32K guidance for {} starts at {} GB. The selected model and context remain unchanged.",
+                profile.label, profile.minimum_memory_gb
+            ),
+        )
+    } else if memory_budget_gb < profile.recommended_memory_gb {
+        (
+            LocalModelFit::Tight,
+            format!(
+                "May work at {memory_budget_gb} GB, but {} GB is recommended for {} at 32K with practical headroom.",
+                profile.recommended_memory_gb, profile.label
+            ),
+        )
+    } else if profile.requires_test {
+        (
+            LocalModelFit::Tight,
+            format!(
+                "Fits the {memory_budget_gb} GB planning tier on paper, but {} needs a local test at {}K before Kairos marks it ready. The selected model and context remain unchanged.",
+                profile.label,
+                context_window_tokens / 1024
+            ),
+        )
+    } else {
+        (
+            LocalModelFit::Recommended,
+            format!(
+                "Recommended for {} at {}K context using Kairos's {memory_budget_gb} GB planning budget.",
+                profile.label,
+                context_window_tokens / 1024
+            ),
+        )
+    };
+
+    LocalModelFitAssessment {
+        fit,
+        budget_gb: Some(memory_budget_gb),
+        minimum_memory_gb: Some(profile.minimum_memory_gb),
+        recommended_memory_gb: Some(profile.recommended_memory_gb),
+        context_window_tokens,
+        maximum_context_tokens: Some(profile.maximum_context_tokens),
+        context_compatible: Some(true),
+        requires_test: profile.requires_test,
+        message,
+    }
+}
+
 /// Curated selector options for the local alpha. A custom saved model stays
 /// visible as an explicit choice rather than being replaced automatically.
 pub fn local_model_choices(selected_model: &str) -> Vec<LocalModelChoice> {
-    let mut choices = vec![
-        LocalModelChoice {
-            id: DEFAULT_LOCAL_MODEL.to_owned(),
-            label: "Qwen 3.6 35B MLX".to_owned(),
-            role: "Default local model".to_owned(),
-        },
-        LocalModelChoice {
-            id: FAST_ROUTER_MODEL.to_owned(),
-            label: "Qwen 3 8B".to_owned(),
-            role: "Fast router / manual fallback".to_owned(),
-        },
-        LocalModelChoice {
-            id: OPTIONAL_LOCAL_MODELS[0].to_owned(),
-            label: "GPT-OSS 20B".to_owned(),
-            role: "Optional alternative".to_owned(),
-        },
-        LocalModelChoice {
-            id: OPTIONAL_LOCAL_MODELS[1].to_owned(),
-            label: "GLM 4.7 Flash".to_owned(),
-            role: "Optional alternative".to_owned(),
-        },
-    ];
+    let mut choices = local_model_profiles()
+        .into_iter()
+        .map(|profile| LocalModelChoice {
+            id: profile.id,
+            label: profile.label,
+            role: profile.role,
+        })
+        .collect::<Vec<_>>();
     if !selected_model.trim().is_empty()
         && !choices
             .iter()
@@ -774,6 +1203,145 @@ mod tests {
             local_model_choices(&settings.selected_model)
                 .iter()
                 .any(|choice| choice.id == "my-model:latest")
+        );
+    }
+
+    #[test]
+    fn memory_budget_round_trips_auto_preset_and_custom_without_touching_the_model() {
+        let local_model = LocalModelSettings::default();
+        let mut setup = LocalSetupSettings::default();
+
+        setup
+            .set_memory_budget(MemoryBudgetMode::Auto, None)
+            .unwrap();
+        assert_eq!(setup.resolved_memory_budget_mode(), MemoryBudgetMode::Auto);
+        assert_eq!(setup.effective_memory_budget_gb(Some(48)), Some(48));
+
+        setup
+            .set_memory_budget(MemoryBudgetMode::Preset, Some(32))
+            .unwrap();
+        assert_eq!(
+            setup.resolved_memory_budget_mode(),
+            MemoryBudgetMode::Preset
+        );
+        assert_eq!(setup.memory_budget_gb, Some(32));
+        assert_eq!(setup.effective_memory_budget_gb(Some(48)), Some(32));
+
+        setup
+            .set_memory_budget(MemoryBudgetMode::Custom, Some(37))
+            .unwrap();
+        assert_eq!(
+            setup.resolved_memory_budget_mode(),
+            MemoryBudgetMode::Custom
+        );
+        assert_eq!(setup.memory_budget_gb, Some(37));
+        assert_eq!(
+            serde_json::to_value(&setup).unwrap()["memoryBudgetMode"],
+            "custom"
+        );
+        assert_eq!(local_model.selected_model, DEFAULT_LOCAL_MODEL);
+        assert_eq!(
+            local_model.context_window_tokens,
+            DEFAULT_CONTEXT_WINDOW_TOKENS
+        );
+
+        assert!(
+            setup
+                .set_memory_budget(MemoryBudgetMode::Preset, Some(37))
+                .is_err()
+        );
+        assert!(
+            setup
+                .set_memory_budget(MemoryBudgetMode::Auto, Some(48))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn legacy_v3_memory_value_is_inferred_without_losing_the_user_choice() {
+        let legacy_preset = LocalSetupSettings {
+            memory_budget_gb: Some(32),
+            memory_budget_mode: MemoryBudgetMode::Auto,
+        };
+        assert_eq!(
+            legacy_preset.resolved_memory_budget_mode(),
+            MemoryBudgetMode::Preset
+        );
+        assert_eq!(legacy_preset.effective_memory_budget_gb(Some(48)), Some(32));
+
+        let legacy_custom = LocalSetupSettings {
+            memory_budget_gb: Some(37),
+            memory_budget_mode: MemoryBudgetMode::Auto,
+        };
+        assert_eq!(
+            legacy_custom.resolved_memory_budget_mode(),
+            MemoryBudgetMode::Custom
+        );
+        assert_eq!(legacy_custom.effective_memory_budget_gb(Some(48)), Some(37));
+    }
+
+    #[test]
+    fn catalog_fit_is_budget_aware_and_never_implies_a_silent_change() {
+        let fast = assess_local_model_fit(FAST_ROUTER_MODEL, Some(16), 32_768);
+        assert_eq!(fast.fit, LocalModelFit::Recommended);
+        assert!(!fast.requires_test);
+        let fast_json = serde_json::to_value(&fast).unwrap();
+        assert_eq!(fast_json["fit"], "recommended");
+        assert_eq!(fast_json["minimumMemoryGb"], 16);
+        assert_eq!(fast_json["contextWindowTokens"], 32_768);
+        assert_eq!(fast_json["requiresTest"], false);
+
+        let default_tight = assess_local_model_fit(DEFAULT_LOCAL_MODEL, Some(32), 32_768);
+        assert_eq!(default_tight.fit, LocalModelFit::Tight);
+        assert!(default_tight.message.contains("48 GB is recommended"));
+
+        let default_ready = assess_local_model_fit(DEFAULT_LOCAL_MODEL, Some(48), 32_768);
+        assert_eq!(default_ready.fit, LocalModelFit::Recommended);
+
+        let glm = assess_local_model_fit("glm-4.7-flash", Some(32), 32_768);
+        assert_eq!(glm.fit, LocalModelFit::Tight);
+        assert!(glm.requires_test);
+
+        let unsupported_context = assess_local_model_fit(FAST_ROUTER_MODEL, Some(16), 65_536);
+        assert_eq!(unsupported_context.fit, LocalModelFit::NotRecommended);
+        assert_eq!(unsupported_context.context_compatible, Some(false));
+        assert!(
+            unsupported_context
+                .message
+                .contains("will not lower the context")
+        );
+
+        let custom = assess_local_model_fit("my-model:latest", Some(48), 32_768);
+        assert_eq!(custom.fit, LocalModelFit::Unknown);
+        assert!(custom.message.contains("keep your selected model"));
+    }
+
+    #[test]
+    fn catalog_covers_the_researched_memory_tiers() {
+        let profiles = local_model_profiles();
+        assert!(profiles.iter().any(|profile| {
+            profile.id == "gemma3:12b"
+                && profile.minimum_memory_gb == 24
+                && profile.recommended_memory_gb == 24
+        }));
+        assert!(profiles.iter().any(|profile| {
+            profile.id == "llama3.3:70b"
+                && profile.minimum_memory_gb == 64
+                && profile.recommended_memory_gb == 64
+        }));
+        assert!(profiles.iter().any(|profile| {
+            profile.id == "qwen3:32b"
+                && profile.minimum_memory_gb == 48
+                && profile.recommended_memory_gb == 48
+        }));
+        assert!(profiles.iter().any(|profile| {
+            profile.id == "qwen3:235b"
+                && profile.minimum_memory_gb == 192
+                && profile.recommended_memory_gb == 192
+        }));
+        assert_eq!(
+            local_model_profile(DEFAULT_LOCAL_MODEL).and_then(|profile| profile.package_size_bytes),
+            Some(22_000_000_000)
         );
     }
 

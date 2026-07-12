@@ -32,6 +32,7 @@ type AppStatus = {
     installedModels: string[];
     setupMessage?: string;
     choices: Array<{ id: string; label: string; role: string }>;
+    selectedModelFit?: ModelFit;
   };
   app?: {
     summonShortcut?: string;
@@ -82,13 +83,34 @@ type LocalBrief = {
   context: ContextPack;
 };
 
+type ModelFit = {
+  fit: "recommended" | "tight" | "not_recommended" | "unknown";
+  budgetGb?: number | null;
+  minimumMemoryGb?: number | null;
+  recommendedMemoryGb?: number | null;
+  contextWindowTokens?: number;
+  maximumContextTokens?: number | null;
+  contextCompatible?: boolean | null;
+  requiresTest?: boolean;
+  message: string;
+};
+
 type LocalSetupModel = {
   id: string;
   label?: string;
+  role?: string;
   installed?: boolean;
   downloadSize?: string;
   memoryBand?: string;
   recommendedContext?: string;
+  fit?: ModelFit;
+};
+
+type OllamaInstallAction = {
+  command?: string;
+  label?: string;
+  officialUrl?: string;
+  needed?: boolean;
 };
 
 type LocalSetupStatus = {
@@ -99,6 +121,14 @@ type LocalSetupStatus = {
   availableDiskGb?: number;
   selectedModelInstalled?: boolean;
   setupMessage?: string;
+  contextWindowTokens?: number;
+  memoryBudgetMode?: "auto" | "preset" | "custom";
+  memoryBudgetGb?: number | null;
+  effectiveMemoryBudgetGb?: number | null;
+  memoryBudgetMessage?: string;
+  memoryBudgetPlanningOnly?: boolean;
+  selectedModelFit?: ModelFit;
+  ollamaInstallAction?: OllamaInstallAction;
   models?: LocalSetupModel[];
 };
 
@@ -208,6 +238,7 @@ type NoteWriteProposal = {
 type ProviderId = "ollama" | "openai" | "anthropic" | "codex-cli" | "claude-cli";
 type ViewId = "chat" | "next" | "map" | "settings";
 type MemoryBudget = "auto" | "custom" | 16 | 24 | 32 | 48 | 64 | 96 | 192;
+type KairosConsentMode = "ask" | "approve_local" | "full_kairos";
 
 type BrainVisual = { label: string; color: string; icon: string };
 
@@ -242,6 +273,12 @@ const browserPreviewSetup: LocalSetupStatus = {
   detectedMemoryGb: 48,
   availableDiskGb: 532,
   selectedModelInstalled: true,
+  contextWindowTokens: 32_768,
+  memoryBudgetMode: "auto",
+  memoryBudgetGb: null,
+  effectiveMemoryBudgetGb: 48,
+  memoryBudgetMessage: "Auto uses detected unified memory as a planning budget. It does not change the model or context.",
+  memoryBudgetPlanningOnly: true,
 };
 
 const initialBrains: BrainRecord[] = [
@@ -305,7 +342,7 @@ const modelCatalog: Record<string, { label: string; role: string; downloadSize: 
   "qwen3.6:35b-mlx": {
     label: "Qwen 3.6 35B MLX",
     role: "Starter default",
-    downloadSize: "~21 GB",
+    downloadSize: "~22 GB",
     memoryBand: "Power · 48 GB+ recommended",
     context: "32K context target",
   },
@@ -319,7 +356,7 @@ const modelCatalog: Record<string, { label: string; role: string; downloadSize: 
   "gpt-oss:20b": {
     label: "GPT-OSS 20B",
     role: "Optional alternative",
-    downloadSize: "Varies by build",
+    downloadSize: "~14 GB",
     memoryBand: "Balanced · 32 GB+",
     context: "32K context target",
   },
@@ -332,12 +369,68 @@ const modelCatalog: Record<string, { label: string; role: string; downloadSize: 
   },
 };
 
+const modelKnownWarnings: Record<string, string> = {
+  "glm-4.7-flash": "Requires Ollama 0.14.3 pre-release or newer before download/test.",
+};
+
+function isInstalledModel(model: string, installedModels: string[]) {
+  const base = model.trim().replace(/:latest$/, "");
+  return installedModels.some((installed) => installed === model || installed === base || installed === `${base}:latest`);
+}
+
+function modelFitLabel(fit?: ModelFit) {
+  switch (fit?.fit) {
+    case "recommended": return "Recommended";
+    case "tight": return fit.requiresTest ? "Test required" : "Tight fit";
+    case "not_recommended": return "Not recommended";
+    default: return "No fit estimate";
+  }
+}
+
+function modelFitTone(fit?: ModelFit): "success" | "warning" | "danger" | "neutral" {
+  switch (fit?.fit) {
+    case "recommended": return "success";
+    case "tight": return "warning";
+    case "not_recommended": return "danger";
+    default: return "neutral";
+  }
+}
+
+function modelFitRank(fit?: ModelFit) {
+  switch (fit?.fit) {
+    case "recommended": return 0;
+    case "tight": return 1;
+    case "unknown": return 2;
+    case "not_recommended": return 3;
+    default: return 2;
+  }
+}
+
 const providers: Array<{ id: ProviderId; label: string; detail: string; external: boolean }> = [
   { id: "ollama", label: "Ollama · local", detail: "Your Mac · no cloud egress", external: false },
   { id: "openai", label: "OpenAI API", detail: "Cloud · preview each turn", external: true },
   { id: "anthropic", label: "Anthropic API", detail: "Cloud · preview each turn", external: true },
   { id: "codex-cli", label: "Codex CLI", detail: "Explicit, ephemeral handoff", external: true },
   { id: "claude-cli", label: "Claude Code CLI", detail: "Explicit, ephemeral handoff", external: true },
+];
+
+const kairosConsentModes: Array<{ id: KairosConsentMode; label: string; detail: string; available?: boolean }> = [
+  {
+    id: "ask",
+    label: "Ask for approval",
+    detail: "Current alpha default: sensitive egress and every note write require confirmation.",
+  },
+  {
+    id: "approve_local",
+    label: "Approve for me",
+    detail: "Local chat is already read-only. Cloud/CLI turns and note writes still require their own confirmation.",
+  },
+  {
+    id: "full_kairos",
+    label: "Full access · coming soon",
+    detail: "Not available in this alpha: Kairos cannot grant macOS, shell, or unconstrained filesystem access.",
+    available: false,
+  },
 ];
 
 const brainVisuals: Record<string, BrainVisual> = {
@@ -740,6 +833,7 @@ export default function App() {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
   const [providerId, setProviderId] = useState<ProviderId>("ollama");
+  const [kairosConsentMode, setKairosConsentMode] = useState<KairosConsentMode>("ask");
   const [brainOverride, setBrainOverride] = useState("auto");
   const [chatPreview, setChatPreview] = useState<ChatPreview | null>(null);
   const [chatSessionId, setChatSessionId] = useState<string | null>(null);
@@ -749,6 +843,7 @@ export default function App() {
   const [providerSettingsFeedback, setProviderSettingsFeedback] = useState<string | null>(null);
   const [memoryBudget, setMemoryBudget] = useState<MemoryBudget>("auto");
   const [customMemoryBudget, setCustomMemoryBudget] = useState("48");
+  const [memoryBudgetBusy, setMemoryBudgetBusy] = useState(false);
   const [modelOperation, setModelOperation] = useState<{ kind: "pull" | "test"; model: string } | null>(null);
   const [pullProgress, setPullProgress] = useState<OllamaPullProgress | null>(null);
   const [failedPullModel, setFailedPullModel] = useState<string | null>(null);
@@ -790,20 +885,50 @@ export default function App() {
   const [writeFeedback, setWriteFeedback] = useState<string | null>(null);
 
   const activeProvider = providers.find((provider) => provider.id === providerId) ?? providers[0];
+  const activeKairosConsentMode = kairosConsentModes.find((mode) => mode.id === kairosConsentMode) ?? kairosConsentModes[0];
   const activeModel = status?.model.resolvedModel ?? status?.model.selectedModel ?? "Checking Ollama";
   const ollamaRunning = localSetup?.running ?? status?.model.running ?? false;
+  const ollamaInstalled = localSetup?.ollamaInstalled ?? ollamaRunning;
   const selectedModelInstalled = localSetup?.selectedModelInstalled ?? status?.model.selectedModelInstalled ?? false;
   const detectedMemoryGb = localSetup?.detectedMemoryGb ?? (nativeRuntime ? 0 : 48);
   const availableDiskGb = localSetup?.availableDiskGb ?? (nativeRuntime ? 0 : 532);
+  const customMemoryBudgetValue = Math.max(1, Math.min(192, Number(customMemoryBudget) || detectedMemoryGb || 1));
   const effectiveMemoryBudget = memoryBudget === "auto"
-    ? detectedMemoryGb || 48
+    ? (localSetup?.effectiveMemoryBudgetGb ?? (detectedMemoryGb || 48))
     : memoryBudget === "custom"
-      ? Math.max(1, Number(customMemoryBudget) || detectedMemoryGb)
+      ? customMemoryBudgetValue
       : memoryBudget;
+  const memoryBudgetPending = memoryBudget === "custom"
+    && (localSetup?.memoryBudgetMode !== "custom" || localSetup?.memoryBudgetGb !== customMemoryBudgetValue);
+  const selectedModelFit = localSetup?.selectedModelFit ?? status?.model.selectedModelFit;
   const modelReady = Boolean(status?.initialized && ollamaRunning && selectedModelInstalled);
+  const chatCanSend = Boolean(composer.trim()) && !busy && (activeProvider.external || modelReady);
+  const composerProviderDetail = !activeProvider.external && !modelReady
+    ? (localSetup?.setupMessage ?? status?.model.setupMessage ?? "Select and download a ready local model before sending.")
+    : activeProvider.detail;
   const selectedBrain = brains.find((brain) => brain.id === brainOverride);
   const writableBrains = brains.filter(canConfirmWrites);
   const graphNode = graph.nodes.find((node) => node.id === selectedGraphNode);
+  const modelCards = useMemo(() => {
+    const setupModels: LocalSetupModel[] = localSetup?.models?.length
+      ? localSetup.models
+      : (status?.model.choices ?? []).map((choice) => ({
+        id: choice.id,
+        label: choice.label,
+        installed: isInstalledModel(choice.id, status?.model.installedModels ?? []),
+        downloadSize: modelCatalog[choice.id]?.downloadSize,
+        memoryBand: modelCatalog[choice.id]?.memoryBand,
+        recommendedContext: modelCatalog[choice.id]?.context,
+      }));
+    const selectedModel = status?.model.selectedModel;
+    return [...setupModels].sort((left, right) => {
+      const selectedDifference = Number(right.id === selectedModel) - Number(left.id === selectedModel);
+      if (selectedDifference) return selectedDifference;
+      const fitDifference = modelFitRank(left.fit) - modelFitRank(right.fit);
+      if (fitDifference) return fitDifference;
+      return (left.label ?? left.id).localeCompare(right.label ?? right.id);
+    });
+  }, [localSetup?.models, status?.model.choices, status?.model.installedModels, status?.model.selectedModel]);
 
   const routeIcon = error ? routeError : briefResult
     ? briefResult.context.route.brains.length > 1 ? routeMulti : routeOne
@@ -888,6 +1013,25 @@ export default function App() {
   useEffect(() => {
     void refreshStatus();
   }, []);
+
+  useEffect(() => {
+    const mode = localSetup?.memoryBudgetMode;
+    if (!mode) return;
+    if (mode === "auto") {
+      setMemoryBudget("auto");
+      return;
+    }
+    if (mode === "custom") {
+      setMemoryBudget("custom");
+      if (typeof localSetup.memoryBudgetGb === "number") {
+        setCustomMemoryBudget(String(localSetup.memoryBudgetGb));
+      }
+      return;
+    }
+    if (typeof localSetup.memoryBudgetGb === "number") {
+      setMemoryBudget(localSetup.memoryBudgetGb as MemoryBudget);
+    }
+  }, [localSetup?.memoryBudgetMode, localSetup?.memoryBudgetGb]);
 
   useEffect(() => {
     if (!nativeRuntime) return;
@@ -1140,6 +1284,10 @@ export default function App() {
   const submitChat = async (confirmedExternal = false) => {
     const message = chatPreview?.message ?? composer.trim();
     if (!message || busy) return;
+    if (!activeProvider.external && !modelReady) {
+      setError(localSetup?.setupMessage ?? status?.model.setupMessage ?? "The selected local model is not ready. Kairos did not switch models.");
+      return;
+    }
     if (activeProvider.external && !confirmedExternal) {
       await previewExternalTurn(message);
       return;
@@ -1200,6 +1348,7 @@ export default function App() {
   };
 
   const pickTemporaryAttachments = async () => {
+    setChatPreview(null);
     const selected = await callFeature<Attachment[]>(
       "pick_temp_attachments",
       undefined,
@@ -1211,6 +1360,7 @@ export default function App() {
   };
 
   const discardAttachment = (attachmentId: string) => {
+    setChatPreview(null);
     setAttachments((current) => current.filter((attachment) => attachment.id !== attachmentId));
     if (nativeRuntime) void invoke("discard_temp_attachment", { attachmentId }).catch(() => undefined);
   };
@@ -1277,6 +1427,33 @@ export default function App() {
       window.open(ollamaInstallUrl, "_blank", "noopener,noreferrer");
       setCapabilityNotice("Opened the official Ollama download page in your browser.");
     }
+  };
+
+  const applyMemoryBudget = async (nextBudget: MemoryBudget) => {
+    const memoryBudgetMode = nextBudget === "auto"
+      ? "auto"
+      : nextBudget === "custom"
+        ? "custom"
+        : "preset";
+    const memoryBudgetGb = nextBudget === "auto"
+      ? null
+      : nextBudget === "custom"
+        ? customMemoryBudgetValue
+        : nextBudget;
+    setMemoryBudget(nextBudget);
+    setMemoryBudgetBusy(true);
+    setSetupFeedback(null);
+    const result = await callFeature<LocalSetupStatus>(
+      "set_memory_budget",
+      { memoryBudgetMode, memoryBudgetGb },
+      "Kairos could not save this memory plan. Your selected model and context were not changed.",
+    );
+    if (result) {
+      setLocalSetup(result);
+      setSetupFeedback(`Memory plan saved: ${memoryBudgetMode === "auto" ? "Auto" : `${memoryBudgetGb} GB`}. Your model and 32K target remain unchanged.`);
+      await refreshStatus();
+    }
+    setMemoryBudgetBusy(false);
   };
 
   const pickBrainFolder = async () => {
@@ -1379,6 +1556,7 @@ export default function App() {
         closeToHide: preferences.closeToHide,
         contextWindowTokens: preferences.contextWindowTokens,
         memoryBudgetGb: memoryBudget === "auto" ? null : effectiveMemoryBudget,
+        memoryBudgetMode: memoryBudget === "auto" ? "auto" : memoryBudget === "custom" ? "custom" : "preset",
       },
       "These preferences will save once the native settings bridge is included. The preview is unchanged.",
     );
@@ -1537,20 +1715,21 @@ export default function App() {
               </StatusPill>
             </div>
 
-            <div className="chat-context-bar">
+            <div className="chat-context-bar chat-context-bar--route-only">
               <label>
                 <span>Route</span>
-                <select value={brainOverride} onChange={(event) => setBrainOverride(event.target.value)}>
+                <select
+                  value={brainOverride}
+                  onChange={(event) => {
+                    setBrainOverride(event.target.value);
+                    if (chatPreview) setChatPreview(null);
+                  }}
+                  disabled={busy || Boolean(chatPreview)}
+                >
                   <option value="auto">Auto-route</option>
                   {brains.filter((brain) => brain.enabled !== false).map((brain) => (
                     <option key={brain.id} value={brain.id}>{brain.name}</option>
                   ))}
-                </select>
-              </label>
-              <label>
-                <span>Provider</span>
-                <select value={providerId} onChange={(event) => setProviderId(event.target.value as ProviderId)}>
-                  {providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
                 </select>
               </label>
             </div>
@@ -1613,38 +1792,103 @@ export default function App() {
               </aside>
             )}
 
-            <div className="chat-composer">
+            <form
+              className="chat-composer"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (!chatCanSend) return;
+                void submitChat();
+              }}
+            >
               {attachments.length > 0 && (
                 <div className="attachment-row" aria-label="Temporary attachments">
                   {attachments.map((attachment) => (
                     <span key={attachment.id} className="attachment-chip">
                       <span>⌁</span>{attachment.name}
-                      <button onClick={() => discardAttachment(attachment.id)} aria-label={`Remove ${attachment.name}`}>×</button>
+                      <button type="button" onClick={() => discardAttachment(attachment.id)} aria-label={`Remove ${attachment.name}`}>×</button>
                     </span>
                   ))}
                 </div>
               )}
               <textarea
                 value={composer}
-                onChange={(event) => setComposer(event.target.value)}
+                onChange={(event) => {
+                  setComposer(event.target.value);
+                  if (chatPreview) setChatPreview(null);
+                }}
                 onKeyDown={(event) => {
-                  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-                    event.preventDefault();
-                    void submitChat();
-                  }
+                  if (
+                    event.key !== "Enter"
+                    || event.shiftKey
+                    || event.nativeEvent.isComposing
+                    || event.nativeEvent.keyCode === 229
+                  ) return;
+                  event.preventDefault();
+                  if (chatCanSend) void submitChat();
                 }}
                 placeholder="Ask Kairos about a project, decision, or next action…"
                 rows={expanded ? 3 : 2}
+                disabled={busy}
+                aria-keyshortcuts="Enter"
               />
               <div className="composer-actions">
-                <button className="attachment-button" onClick={() => void pickTemporaryAttachments()} title="Temporary local file selection">Attach</button>
-                <span className="composer-hint">⌘↵ to send · {activeProvider.detail}</span>
-                <button className="primary-action" onClick={() => void submitChat()} disabled={!composer.trim() || busy}>
-                  {activeProvider.external ? "Preview" : "Send"}
+                <button
+                  type="button"
+                  className="attachment-button"
+                  onClick={() => void pickTemporaryAttachments()}
+                  title="Attach up to five temporary files for this turn"
+                  aria-label="Attach temporary files"
+                  disabled={busy}
+                >
+                  <span aria-hidden="true">＋</span>
+                </button>
+                <label className="composer-select composer-select--consent" title={activeKairosConsentMode.detail}>
+                  <span className="composer-select__icon" aria-hidden="true">✋</span>
+                  <span className="sr-only">Kairos execution and consent mode</span>
+                  <select value={kairosConsentMode} onChange={(event) => setKairosConsentMode(event.target.value as KairosConsentMode)} aria-label="Kairos execution and consent mode" disabled={busy}>
+                    {kairosConsentModes.map((mode) => <option key={mode.id} value={mode.id} disabled={mode.available === false}>{mode.label}</option>)}
+                  </select>
+                </label>
+                <label className="composer-select">
+                  <span className="sr-only">Provider</span>
+                  <select value={providerId} onChange={(event) => setProviderId(event.target.value as ProviderId)} aria-label="Provider" disabled={busy || Boolean(chatPreview)}>
+                    {providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
+                  </select>
+                </label>
+                {providerId === "ollama" && (
+                  <label className="composer-select composer-select--model">
+                    <span className="sr-only">Ollama model</span>
+                    <select
+                      value={status?.model.selectedModel ?? ""}
+                      onChange={(event) => void selectModel(event.target.value)}
+                      disabled={!status || busy || Boolean(chatPreview) || !nativeRuntime}
+                      aria-label="Ollama model"
+                    >
+                      {!status && <option value="">Checking local models…</option>}
+                      {status?.model.choices.map((choice) => {
+                        const installed = isInstalledModel(choice.id, status.model.installedModels);
+                        return <option key={choice.id} value={choice.id}>{choice.label}{installed ? "" : " · download required"}</option>;
+                      })}
+                    </select>
+                  </label>
+                )}
+                <span className="composer-hint" title={composerProviderDetail}>{composerProviderDetail}</span>
+                <button
+                  type="submit"
+                  className="composer-send-button"
+                  disabled={!chatCanSend}
+                  aria-label={activeProvider.external ? "Preview external message" : "Send local message"}
+                  title={activeProvider.external ? "Review before sending" : "Send local message"}
+                >
+                  <span aria-hidden="true">↑</span>
+                  <span className="sr-only">{activeProvider.external ? "Preview" : "Send"}</span>
                 </button>
               </div>
+              <p className="composer-consent-note">
+                {activeKairosConsentMode.detail} This control does not bypass egress or write policy: cloud, API, and CLI turns always show a review before sending; note writes always require a diff confirmation.
+              </p>
               {attachmentNotice && <p className="attachment-notice">{attachmentNotice}</p>}
-            </div>
+            </form>
           </section>
         )}
 
@@ -1831,36 +2075,58 @@ export default function App() {
                 <div><span>Free disk</span><strong>{availableDiskGb ? `${availableDiskGb} GB` : "Detecting…"}</strong><small>Model packages are stored by Ollama.</small></div>
                 <div><span>Context target</span><strong>32K</strong><small>More context also uses more memory.</small></div>
               </div>
-              <div className="memory-controls">
-                <label><span>Memory budget</span><select value={String(memoryBudget)} onChange={(event) => setMemoryBudget((event.target.value === "auto" || event.target.value === "custom" ? event.target.value : Number(event.target.value)) as MemoryBudget)}>
-                  <option value="auto">{detectedMemoryGb ? `Auto (${detectedMemoryGb} GB detected)` : "Auto (detect hardware)"}</option>
-                  {[16, 24, 32, 48, 64, 96, 192].map((amount) => <option key={amount} value={amount}>{amount} GB</option>)}
-                  <option value="custom">Custom</option>
-                </select></label>
-                {memoryBudget === "custom" && <label><span>Custom budget (GB)</span><input type="number" min="1" value={customMemoryBudget} onChange={(event) => setCustomMemoryBudget(event.target.value)} /></label>}
-                <p>Kairos uses this as a recommendation budget. Model fit also depends on free memory, context, and other running apps.</p>
-              </div>
-              {!ollamaRunning && (
-                <div className="setup-inline setup-inline--warning">
-                  <div><strong>{localSetup?.ollamaInstalled === false ? "Ollama is not installed." : "Ollama is not running."}</strong><span>Install or start it, then return here and refresh status.</span></div>
-                  <button className="primary-action" onClick={() => void openOllamaInstall()}>Install Ollama</button>
+              <div className="memory-setup-row">
+                <div className="memory-controls">
+                  <label><span>Memory budget</span><select value={String(memoryBudget)} disabled={memoryBudgetBusy} onChange={(event) => {
+                    const nextBudget = (event.target.value === "auto" || event.target.value === "custom" ? event.target.value : Number(event.target.value)) as MemoryBudget;
+                    setMemoryBudget(nextBudget);
+                    if (nextBudget !== "custom") void applyMemoryBudget(nextBudget);
+                  }}>
+                    <option value="auto">{detectedMemoryGb ? `Auto (${detectedMemoryGb} GB detected)` : "Auto (detect hardware)"}</option>
+                    {[16, 24, 32, 48, 64, 96, 192].map((amount) => <option key={amount} value={amount}>{amount} GB</option>)}
+                    <option value="custom">Custom</option>
+                  </select></label>
+                  {memoryBudget === "custom" && <label><span>Custom budget (GB)</span><input type="number" min="1" max="192" value={customMemoryBudget} disabled={memoryBudgetBusy} onChange={(event) => setCustomMemoryBudget(event.target.value)} /></label>}
+                  <div className="memory-budget-copy">
+                    <strong>{effectiveMemoryBudget} GB planning budget</strong>
+                    <p>{localSetup?.memoryBudgetMessage ?? "Changing this budget re-ranks model guidance only. Kairos does not change your model or context automatically."}</p>
+                    {memoryBudgetPending && <span className="memory-plan-pending">Pending apply — the catalog below still reflects your saved budget.</span>}
+                    {memoryBudget === "custom" && <button className="text-action" onClick={() => void applyMemoryBudget("custom")} disabled={memoryBudgetBusy}>Apply custom budget</button>}
+                  </div>
                 </div>
+                <aside className={`ollama-health ${ollamaRunning ? "is-running" : "is-warning"}`} aria-label="Ollama setup health">
+                  <div className="ollama-health__heading"><div><p className="section-label">Ollama</p><h3>{!ollamaInstalled ? "Not installed" : ollamaRunning ? "Running locally" : "Installed, not running"}</h3></div><StatusPill tone={ollamaRunning ? "success" : "warning"}>{ollamaRunning ? "READY" : "SETUP"}</StatusPill></div>
+                  <p>{ollamaRunning ? `${localSetup?.endpoint ?? "http://localhost:11434"} · ${status?.model.installedModels.length ?? 0} installed model${(status?.model.installedModels.length ?? 0) === 1 ? "" : "s"}` : localSetup?.setupMessage ?? "Check the local Ollama service before using a local model."}</p>
+                  {!ollamaInstalled ? <button className="primary-action" onClick={() => void openOllamaInstall()}>{localSetup?.ollamaInstallAction?.label ?? "Install Ollama"}</button> : <button className="secondary-action" onClick={() => void refreshStatus()}>Refresh status</button>}
+                </aside>
+              </div>
+              {selectedModelFit && (
+                <aside className={`memory-fit memory-fit--${selectedModelFit.fit}`}>
+                  <div><StatusPill tone={modelFitTone(selectedModelFit)}>{modelFitLabel(selectedModelFit).toUpperCase()}</StatusPill><strong>{status?.model.selectedModel ?? "Selected model"} · {selectedModelFit.contextWindowTokens ? `${Math.round(selectedModelFit.contextWindowTokens / 1024)}K` : "32K"}</strong></div>
+                  <p>{selectedModelFit.message}</p>
+                </aside>
               )}
+              <div className="model-catalog-heading"><div><p className="section-label">Memory-aware catalog</p><h3>{memoryBudgetPending ? `Pending fit for ${effectiveMemoryBudget} GB` : `Model fit for ${effectiveMemoryBudget} GB`} · {preferences.contextWindowTokens / 1024}K single local chat</h3></div><p>{memoryBudgetPending ? "Apply the custom budget to re-rank these cards." : "Recommended cards lead the catalog; your selected model stays visible even when it needs a test."}</p></div>
               <div className="model-grid">
-                {Object.entries(modelCatalog).map(([id, model]) => {
-                  const setupModel = localSetup?.models?.find((candidate) => candidate.id === id);
-                  const installed = setupModel?.installed ?? status?.model.installedModels.includes(id) ?? false;
+                {modelCards.map((setupModel) => {
+                  const fallback = modelCatalog[setupModel.id];
+                  const id = setupModel.id;
+                  const installed = setupModel.installed ?? isInstalledModel(id, status?.model.installedModels ?? []);
                   const selected = status?.model.selectedModel === id;
                   const working = modelOperation?.model === id;
                   const pulling = modelOperation?.kind === "pull" && modelOperation.model === id;
                   const progress = pulling && pullProgress?.model === id ? pullProgress : null;
-                  return <article className={`model-card ${selected ? "is-selected" : ""}`} key={id}>
-                    <div><p className="section-label">{model.role}</p><h3>{model.label}</h3><p>{setupModel?.memoryBand ?? model.memoryBand}</p></div>
-                    <dl><div><dt>Package</dt><dd>{setupModel?.downloadSize ?? model.downloadSize}</dd></div><div><dt>Context</dt><dd>{setupModel?.recommendedContext ?? model.context}</dd></div></dl>
+                  const fit = setupModel.fit;
+                  const knownWarning = modelKnownWarnings[id];
+                  return <article className={`model-card ${selected ? "is-selected" : ""} model-card--${fit?.fit ?? "unknown"}`} key={id}>
+                    <div><p className="section-label">{setupModel.role ?? fallback?.role ?? "Catalog model"}</p><h3>{setupModel.label ?? fallback?.label ?? id}</h3><p>{fit?.message ?? setupModel.memoryBand ?? fallback?.memoryBand ?? "Fit estimate becomes available after the local setup check."}</p></div>
+                    <dl><div><dt>Package</dt><dd>{setupModel.downloadSize ?? fallback?.downloadSize ?? "Reported by Ollama during download"}</dd></div><div><dt>Context</dt><dd>{setupModel.recommendedContext ?? fallback?.context ?? "32K target"}</dd></div></dl>
+                    {knownWarning && <small className="model-card__warning">{knownWarning}</small>}
                     <div className="model-card__actions">
-                      {installed ? <StatusPill tone="success">INSTALLED</StatusPill> : pulling ? <div className="model-pull-progress"><progress max="100" value={progress?.percent} /><span>{progress?.percent !== undefined ? `${Math.round(progress.percent)}% · ${progress.status}` : progress?.status ?? "Starting download…"}</span><button className="secondary-action" onClick={() => void cancelPullModel(id)}>Cancel</button></div> : <button className="secondary-action" onClick={() => void handlePullModel(id)} disabled={Boolean(working)}>{failedPullModel === id ? "Retry download" : "Download"}</button>}
-                      {installed && <button className="text-action" onClick={() => void handleTestModel(id)} disabled={Boolean(working)}>{working && modelOperation?.kind === "test" ? "Testing…" : "Test"}</button>}
-                      {installed && !selected && <button className="text-action" onClick={() => void selectModel(id)} disabled={busy}>Use this model</button>}
+                      {fit && <StatusPill tone={modelFitTone(fit)}>{fit.requiresTest && fit.fit === "recommended" ? "TEST RECOMMENDED" : modelFitLabel(fit).toUpperCase()}</StatusPill>}
+                      {installed ? <StatusPill tone="success">INSTALLED</StatusPill> : pulling ? <div className="model-pull-progress"><progress max="100" value={progress?.percent} /><span>{progress?.percent !== undefined ? `${Math.round(progress.percent)}% · ${progress.status}` : progress?.status ?? "Starting download…"}</span><button className="secondary-action" onClick={() => void cancelPullModel(id)}>Cancel</button></div> : <button className="secondary-action" onClick={() => void handlePullModel(id)} disabled={Boolean(working)} title="Downloads this model only; it will not change your active model">{failedPullModel === id ? "Retry download" : "Download"}</button>}
+                      {installed && <button className="text-action" onClick={() => void handleTestModel(id)} disabled={Boolean(working)}>{working && modelOperation?.kind === "test" ? "Testing…" : "Test at 32K"}</button>}
+                      {installed && !selected && <button className="text-action" onClick={() => void selectModel(id)} disabled={busy || memoryBudgetBusy}>Use this model</button>}
                     </div>
                   </article>;
                 })}

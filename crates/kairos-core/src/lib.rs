@@ -16,10 +16,13 @@ mod write;
 pub use config::{
     AppSettings, BrainRecord, BrainRole, CURRENT_CONFIG_VERSION, DEFAULT_CONTEXT_WINDOW_TOKENS,
     DEFAULT_LOCAL_MODEL, DEFAULT_OLLAMA_ENDPOINT, EgressPolicy, FAST_ROUTER_MODEL,
-    InferenceSettings, KairosConfig, LocalModelChoice, LocalModelSettings, LocalSetupSettings,
-    OPTIONAL_LOCAL_MODELS, ProviderConfig, ProviderKind, ReadPolicy, SummonTarget, WritePolicy,
-    application_support_dir, default_brain_read_policy, default_config_path, default_tharm_config,
-    load_config, load_or_migrate_config, local_model_choices, migration_backup_path, write_config,
+    InferenceSettings, KairosConfig, LocalModelChoice, LocalModelFit, LocalModelFitAssessment,
+    LocalModelProfile, LocalModelSettings, LocalSetupSettings, MEMORY_BUDGET_PRESETS_GB,
+    MemoryBudgetMode, OPTIONAL_LOCAL_MODELS, ProviderConfig, ProviderKind, ReadPolicy,
+    SummonTarget, WritePolicy, application_support_dir, assess_local_model_fit,
+    default_brain_read_policy, default_config_path, default_tharm_config, load_config,
+    load_or_migrate_config, local_model_choices, local_model_profile, local_model_profiles,
+    migration_backup_path, write_config,
 };
 pub use context::{
     ContextPack, DeniedSource, SourceExcerpt, SourceRef, build_context, render_handoff,
