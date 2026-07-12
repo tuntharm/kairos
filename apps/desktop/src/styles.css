@@ -459,16 +459,31 @@ pre { max-height: 210px; overflow: auto; margin: 0; border-top: 1px solid rgba(1
 .graph-filters button { border: 1px solid rgba(165, 180, 204, .2); border-radius: 999px; padding: 6px 9px; color: var(--kairos-text-secondary); background: rgba(3, 8, 20, .3); cursor: pointer; font-size: 10px; font-weight: 700; }
 .graph-filters button.is-active { border-color: rgba(118, 228, 255, .47); color: var(--kairos-active-cyan); background: rgba(118, 228, 255, .08); }
 .graph-search { width: min(100%, 206px); }
+.graph-legend { display: flex; flex-wrap: wrap; gap: 7px 11px; margin: -3px 0 13px; color: var(--kairos-text-secondary); font-size: 9px; font-weight: 650; }
+.graph-legend > span { display: inline-flex; align-items: center; gap: 5px; }
+.graph-legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--legend-color); box-shadow: 0 0 7px color-mix(in srgb, var(--legend-color) 65%, transparent); }
+.graph-legend__edge { margin-left: auto; }
+.graph-legend__edge i { width: 17px; height: 0; border-top: 1px dashed var(--kairos-kairos-gold); border-radius: 0; background: transparent; box-shadow: none; }
 .graph-layout { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(210px, .58fr); gap: 13px; }
 .graph-canvas { position: relative; min-height: 424px; overflow: hidden; border: 1px solid rgba(76, 159, 255, .18); border-radius: var(--kairos-radius-lg); background: radial-gradient(circle at 50% 48%, rgba(76, 159, 255, .13), transparent 33%), rgba(3, 8, 20, .46); }
-.graph-lines { position: absolute; inset: 7% 4%; width: 92%; height: 86%; overflow: visible; }
-.graph-lines line { stroke: rgba(165, 180, 204, .34); stroke-width: .38; vector-effect: non-scaling-stroke; }
-.graph-node { --node-color: var(--kairos-generic); position: absolute; display: inline-flex; align-items: center; max-width: 130px; gap: 6px; transform: translate(-50%, -50%); border: 1px solid color-mix(in srgb, var(--node-color) 42%, transparent); border-radius: 999px; padding: 6px 9px; color: var(--kairos-ivory); background: color-mix(in srgb, var(--node-color) 15%, var(--kairos-surface)); box-shadow: 0 5px 18px rgba(0, 0, 0, .25); cursor: pointer; font-size: 10px; font-weight: 700; text-align: left; }
+.graph-lines { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.graph-lines line { stroke: rgba(165, 180, 204, .23); stroke-width: .3; vector-effect: non-scaling-stroke; }
+.graph-lines line.is-containment { stroke: rgba(149, 165, 191, .22); stroke-width: .2; }
+.graph-lines line.is-tag { stroke: rgba(149, 165, 191, .34); stroke-width: .28; stroke-dasharray: .7 1.2; }
+.graph-lines line.is-cross-brain { stroke: rgba(255, 199, 102, .9); stroke-width: .62; stroke-dasharray: 1.3 1; }
+.graph-node { --node-color: var(--kairos-generic); position: absolute; z-index: 1; display: grid; width: 10px; height: 10px; place-items: center; transform: translate(-50%, -50%); border: 1px solid color-mix(in srgb, var(--node-color) 58%, transparent); border-radius: 50%; padding: 0; background: color-mix(in srgb, var(--node-color) 74%, var(--kairos-surface)); box-shadow: 0 0 9px color-mix(in srgb, var(--node-color) 42%, transparent); cursor: pointer; }
 .graph-node:hover,
-.graph-node.is-selected { border-color: var(--node-color); box-shadow: 0 0 0 3px color-mix(in srgb, var(--node-color) 17%, transparent), 0 7px 22px rgba(0, 0, 0, .32); }
-.graph-node--manager { padding: 9px 12px; color: #211500; background: var(--kairos-kairos-gold); border-color: #ffe0a1; }
-.graph-node__dot { width: 6px; height: 6px; flex: 0 0 auto; border-radius: 50%; background: var(--node-color); box-shadow: 0 0 8px var(--node-color); }
-.graph-node--manager .graph-node__dot { background: #473000; box-shadow: none; }
+.graph-node.is-selected { z-index: 3; border-color: var(--kairos-ivory); box-shadow: 0 0 0 3px color-mix(in srgb, var(--node-color) 25%, transparent), 0 0 13px color-mix(in srgb, var(--node-color) 62%, transparent); }
+.graph-node--brain { width: 13px; height: 13px; border-width: 2px; background: color-mix(in srgb, var(--node-color) 45%, var(--kairos-surface)); }
+.graph-node--kairos,
+.graph-node--manager { z-index: 2; width: 18px; height: 18px; border: 2px solid #ffe0a1; background: var(--kairos-kairos-gold); box-shadow: 0 0 17px rgba(255, 199, 102, .7); }
+.graph-node__dot { display: block; width: 100%; height: 100%; border-radius: inherit; background: var(--node-color); opacity: .42; }
+.graph-node--kairos .graph-node__dot,
+.graph-node--manager .graph-node__dot { width: 5px; height: 5px; background: #473000; opacity: 1; }
+.graph-node__label { position: absolute; left: calc(100% + 7px); top: 50%; max-width: 170px; transform: translateY(-50%); overflow: hidden; border: 1px solid color-mix(in srgb, var(--node-color) 36%, transparent); border-radius: 6px; padding: 4px 6px; color: var(--kairos-ivory); background: rgba(3, 8, 20, .94); box-shadow: 0 6px 16px rgba(0, 0, 0, .34); font-size: 10px; font-weight: 650; line-height: 1.2; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.graph-node.label-left .graph-node__label { right: calc(100% + 7px); left: auto; text-align: right; }
+.graph-node--kairos .graph-node__label,
+.graph-node--manager .graph-node__label { border-color: rgba(255, 224, 161, .65); }
 .graph-empty { display: grid; height: 424px; place-items: center; color: var(--kairos-text-secondary); font-size: 12px; }
 .graph-inspector { align-self: stretch; border: 1px solid rgba(165, 180, 204, .16); border-radius: var(--kairos-radius-lg); padding: 16px; background: rgba(3, 8, 20, .28); }
 .graph-inspector h2 { margin-bottom: 10px; }
@@ -597,7 +612,7 @@ pre { max-height: 210px; overflow: auto; margin: 0; border-top: 1px solid rgba(1
   .graph-search { width: 100%; }
   .graph-canvas { min-height: 350px; }
   .graph-empty { height: 350px; }
-  .graph-node { max-width: 104px; padding: 5px 7px; font-size: 9px; }
+  .graph-node__label { max-width: 112px; font-size: 9px; }
   .consent-actions { justify-content: stretch; }
   .consent-actions button { flex: 1; }
   .setup-inline { align-items: flex-start; flex-direction: column; }

@@ -134,13 +134,15 @@ type GraphNode = {
   id: string;
   label: string;
   brainId: string;
+  clusterId?: string;
+  relativePath?: string;
   kind?: string;
   x?: number;
   y?: number;
   protected?: boolean;
 };
 
-type GraphEdge = { source: string; target: string; kind?: string };
+type GraphEdge = { id?: string; source: string; target: string; kind?: string };
 
 type GraphSnapshot = {
   nodes: GraphNode[];
@@ -280,7 +282,7 @@ const initialBrains: BrainRecord[] = [
 
 const fallbackGraph: GraphSnapshot = {
   nodes: [
-    { id: "kairos", label: "Kairos", brainId: "kairos", kind: "manager", x: 50, y: 49 },
+    { id: "kairos", label: "Kairos", brainId: "kairos", kind: "kairos", x: 50, y: 49 },
     { id: "everyday-home", label: "Home", brainId: "everyday", kind: "map", x: 25, y: 27 },
     { id: "everyday-routines", label: "Routines", brainId: "everyday", kind: "note", x: 18, y: 66 },
     { id: "everyday-projects", label: "Life projects", brainId: "everyday", kind: "map", x: 35, y: 80 },
@@ -347,13 +349,37 @@ const brainVisuals: Record<string, BrainVisual> = {
 };
 
 const fileVisual: BrainVisual = { label: "File", color: "#A5B4CC", icon: fileCitation };
+const dynamicBrainColors = ["#F28CCB", "#7CCB8C", "#FF9B73", "#8EA8FF", "#C6A4FF", "#E5C45B"];
+
+function stableHash(value: string) {
+  let hash = 2_166_136_261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return hash >>> 0;
+}
+
+function labelForBrainId(brainId: string) {
+  return brainId
+    .replace(/^brain:/, "")
+    .replace(/[-_]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
 
 function hasNativeBridge() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
 function brainVisual(brainId: string): BrainVisual {
-  return brainVisuals[brainId] ?? fileVisual;
+  const knownVisual = brainVisuals[brainId];
+  if (knownVisual) return knownVisual;
+  if (!brainId || brainId === "unassigned") return fileVisual;
+  return {
+    label: labelForBrainId(brainId),
+    color: dynamicBrainColors[stableHash(brainId) % dynamicBrainColors.length],
+    icon: fileCitation,
+  };
 }
 
 function compactPath(path: string) {
@@ -451,30 +477,196 @@ function policyDraftFor(brain: BrainRecord): BrainPolicyDraft {
   };
 }
 
+function graphBrainKey(node: GraphNode) {
+  const candidate = node.brainId || node.clusterId || "kairos";
+  return candidate.replace(/^brain:/, "") || "kairos";
+}
+
+function isKairosGraphNode(node: GraphNode) {
+  return node.id === "kairos" || node.kind === "kairos";
+}
+
+function clampGraphCoordinate(value: number) {
+  return Math.max(1, Math.min(99, value));
+}
+
+function seededUnit(value: string) {
+  return stableHash(value) / 4_294_967_295;
+}
+
+function layoutGraph(nodes: GraphNode[], edges: GraphEdge[]) {
+  const orderedNodes = [...nodes].sort((left, right) => left.id.localeCompare(right.id));
+  if (orderedNodes.length < 2) return orderedNodes;
+
+  const brainIds = Array.from(new Set(orderedNodes
+    .filter((node) => !isKairosGraphNode(node))
+    .map(graphBrainKey)))
+    .sort((left, right) => left.localeCompare(right));
+  const layoutSeed = orderedNodes.map((node) => node.id).join("|");
+  const phase = seededUnit(`clusters:${layoutSeed}`) * Math.PI * 2;
+  const clusterRadius = brainIds.length <= 1 ? 16 : Math.min(24, 15 + brainIds.length * 2);
+  const clusters = new Map<string, { x: number; y: number }>();
+  brainIds.forEach((brainId, index) => {
+    const angle = phase + ((Math.PI * 2 * index) / brainIds.length);
+    clusters.set(brainId, {
+      x: 50 + Math.cos(angle) * clusterRadius,
+      y: 50 + Math.sin(angle) * clusterRadius,
+    });
+  });
+
+  const positions = orderedNodes.map((node) => {
+    const fixed = isKairosGraphNode(node);
+    const hasX = typeof node.x === "number" && Number.isFinite(node.x);
+    const hasY = typeof node.y === "number" && Number.isFinite(node.y);
+    const brainId = graphBrainKey(node);
+    const cluster = clusters.get(brainId) ?? { x: 50, y: 50 };
+    const angle = seededUnit(`${node.id}:angle`) * Math.PI * 2;
+    const isBrainNode = node.kind === "brain";
+    const spread = isBrainNode
+      ? 2.5 + seededUnit(`${node.id}:spread`) * 2.5
+      : 6 + seededUnit(`${node.id}:spread`) * 13;
+    return {
+      x: fixed ? 50 : hasX ? node.x! : clampGraphCoordinate(cluster.x + Math.cos(angle) * spread),
+      y: fixed ? 50 : hasY ? node.y! : clampGraphCoordinate(cluster.y + Math.sin(angle) * spread),
+      vx: 0,
+      vy: 0,
+      lockedX: fixed || hasX,
+      lockedY: fixed || hasY,
+      clusterX: cluster.x,
+      clusterY: cluster.y,
+    };
+  });
+
+  const nodeIndex = new Map(orderedNodes.map((node, index) => [node.id, index]));
+  const edgePairs = edges
+    .flatMap((edge) => {
+      const source = nodeIndex.get(edge.source);
+      const target = nodeIndex.get(edge.target);
+      return source === undefined || target === undefined || source === target ? [] : [{ source, target, edge }];
+    })
+    .sort((left, right) => `${left.edge.source}:${left.edge.target}:${left.edge.kind ?? ""}`.localeCompare(`${right.edge.source}:${right.edge.target}:${right.edge.kind ?? ""}`));
+  const count = orderedNodes.length;
+  const iterations = count > 350 ? 64 : count > 160 ? 78 : 96;
+  const forceX = new Float64Array(count);
+  const forceY = new Float64Array(count);
+  const repulsion = count > 350 ? 3.4 : 4.2;
+
+  for (let step = 0; step < iterations; step += 1) {
+    forceX.fill(0);
+    forceY.fill(0);
+
+    for (let source = 0; source < count; source += 1) {
+      for (let target = source + 1; target < count; target += 1) {
+        let dx = positions[source].x - positions[target].x;
+        let dy = positions[source].y - positions[target].y;
+        let distanceSquared = dx * dx + dy * dy;
+        if (distanceSquared < 0.01) {
+          const angle = seededUnit(`${orderedNodes[source].id}:${orderedNodes[target].id}`) * Math.PI * 2;
+          dx = Math.cos(angle) * 0.1;
+          dy = Math.sin(angle) * 0.1;
+          distanceSquared = 0.01;
+        }
+        const distance = Math.sqrt(distanceSquared);
+        const magnitude = repulsion / (distanceSquared + 0.8);
+        const scale = magnitude / distance;
+        const fx = dx * scale;
+        const fy = dy * scale;
+        if (!positions[source].lockedX) forceX[source] += fx;
+        if (!positions[source].lockedY) forceY[source] += fy;
+        if (!positions[target].lockedX) forceX[target] -= fx;
+        if (!positions[target].lockedY) forceY[target] -= fy;
+      }
+    }
+
+    for (const { source, target, edge } of edgePairs) {
+      const sourcePosition = positions[source];
+      const targetPosition = positions[target];
+      const dx = targetPosition.x - sourcePosition.x;
+      const dy = targetPosition.y - sourcePosition.y;
+      const distance = Math.max(Math.sqrt(dx * dx + dy * dy), 0.01);
+      const kind = edge.kind?.toLowerCase() ?? "";
+      const sourceBrain = graphBrainKey(orderedNodes[source]);
+      const targetBrain = graphBrainKey(orderedNodes[target]);
+      const explicitLink = ["wiki_link", "markdown_link", "embed"].includes(kind);
+      const crossBrain = explicitLink && sourceBrain !== targetBrain && sourceBrain !== "kairos" && targetBrain !== "kairos";
+      const desiredLength = kind === "owns" ? 27 : crossBrain ? 29 : kind === "contains" ? 10 : 15;
+      const strength = kind === "owns" ? 0.012 : crossBrain ? 0.006 : kind === "contains" ? 0.019 : 0.016;
+      const magnitude = (distance - desiredLength) * strength;
+      const fx = (dx / distance) * magnitude;
+      const fy = (dy / distance) * magnitude;
+      if (!sourcePosition.lockedX) forceX[source] += fx;
+      if (!sourcePosition.lockedY) forceY[source] += fy;
+      if (!targetPosition.lockedX) forceX[target] -= fx;
+      if (!targetPosition.lockedY) forceY[target] -= fy;
+    }
+
+    const temperature = 0.38 * (1 - step / iterations) + 0.06;
+    positions.forEach((position, index) => {
+      const anchorStrength = orderedNodes[index].kind === "brain" ? 0.05 : 0.028;
+      if (!position.lockedX) {
+        forceX[index] += (position.clusterX - position.x) * anchorStrength;
+        if (position.x < 8) forceX[index] += (8 - position.x) * 0.3;
+        if (position.x > 92) forceX[index] -= (position.x - 92) * 0.3;
+        const cappedForce = Math.max(-1.25, Math.min(1.25, forceX[index]));
+        position.vx = Math.max(-0.72, Math.min(0.72, (position.vx + cappedForce * temperature) * 0.7));
+        position.x = clampGraphCoordinate(position.x + position.vx);
+      }
+      if (!position.lockedY) {
+        forceY[index] += (position.clusterY - position.y) * anchorStrength;
+        if (position.y < 8) forceY[index] += (8 - position.y) * 0.3;
+        if (position.y > 92) forceY[index] -= (position.y - 92) * 0.3;
+        const cappedForce = Math.max(-1.25, Math.min(1.25, forceY[index]));
+        position.vy = Math.max(-0.72, Math.min(0.72, (position.vy + cappedForce * temperature) * 0.7));
+        position.y = clampGraphCoordinate(position.y + position.vy);
+      }
+    });
+  }
+
+  return orderedNodes.map((node, index) => ({
+    ...node,
+    x: Number(positions[index].x.toFixed(3)),
+    y: Number(positions[index].y.toFixed(3)),
+  }));
+}
+
 function normalizeGraph(value: unknown): GraphSnapshot | null {
   const record = asRecord(value);
   if (!record || !Array.isArray(record.nodes) || !Array.isArray(record.edges)) return null;
-  const nodes = record.nodes.flatMap((item, index): GraphNode[] => {
+  const nodes = record.nodes.flatMap((item): GraphNode[] => {
     const node = asRecord(item);
     if (!node || typeof node.id !== "string") return [];
-    const position = fallbackGraph.nodes[index % fallbackGraph.nodes.length];
+    const kind = typeof node.kind === "string" ? node.kind : "note";
+    const clusterId = typeof node.clusterId === "string" ? node.clusterId : undefined;
+    const brainId = typeof node.brainId === "string"
+      ? node.brainId
+      : kind === "kairos"
+        ? "kairos"
+        : clusterId?.replace(/^brain:/, "") ?? "unassigned";
     return [{
       id: node.id,
       label: typeof node.label === "string" ? node.label : node.id,
-      brainId: typeof node.brainId === "string" ? node.brainId : "kairos",
-      kind: typeof node.kind === "string" ? node.kind : "note",
-      x: typeof node.x === "number" ? node.x : position.x,
-      y: typeof node.y === "number" ? node.y : position.y,
+      brainId,
+      clusterId,
+      relativePath: typeof node.relativePath === "string" ? node.relativePath : undefined,
+      kind,
+      x: typeof node.x === "number" && Number.isFinite(node.x) ? node.x : undefined,
+      y: typeof node.y === "number" && Number.isFinite(node.y) ? node.y : undefined,
       protected: Boolean(node.protected),
     }];
   });
   const edges = record.edges.flatMap((item): GraphEdge[] => {
     const edge = asRecord(item);
     if (!edge || typeof edge.source !== "string" || typeof edge.target !== "string") return [];
-    return [{ source: edge.source, target: edge.target, kind: typeof edge.kind === "string" ? edge.kind : undefined }];
+    return [{
+      id: typeof edge.id === "string" ? edge.id : undefined,
+      source: edge.source,
+      target: edge.target,
+      kind: typeof edge.kind === "string" ? edge.kind : undefined,
+    }];
   });
+  const needsLayout = nodes.some((node) => node.x === undefined || node.y === undefined);
   return nodes.length > 0 ? {
-    nodes,
+    nodes: needsLayout ? layoutGraph(nodes, edges) : nodes,
     edges,
     indexedAt: typeof record.indexedAt === "string" ? record.indexedAt : undefined,
     stale: Boolean(record.stale),
@@ -570,6 +762,7 @@ export default function App() {
   const [graphFilter, setGraphFilter] = useState("all");
   const [graphSearch, setGraphSearch] = useState("");
   const [selectedGraphNode, setSelectedGraphNode] = useState<string | null>(null);
+  const [hoveredGraphNode, setHoveredGraphNode] = useState<string | null>(null);
   const [addBrain, setAddBrain] = useState<{
     selectionToken: string;
     displayPath?: string;
@@ -1257,6 +1450,12 @@ export default function App() {
   }), [graph, graphFilter, graphSearch]);
   const graphNodeIds = new Set(graphNodes.map((node) => node.id));
   const graphEdges = graph.edges.filter((edge) => graphNodeIds.has(edge.source) && graphNodeIds.has(edge.target));
+  const graphNodeById = useMemo(() => new Map(graphNodes.map((node) => [node.id, node])), [graphNodes]);
+  const graphLegend = useMemo(() => Array.from(new Set(graph.nodes
+    .map((node) => node.brainId)
+    .filter((brainId) => brainId && brainId !== "kairos")))
+    .sort((left, right) => left.localeCompare(right))
+    .map((brainId) => ({ id: brainId, ...brainVisual(brainId) })), [graph]);
 
   const showView = (nextView: ViewId) => {
     setView(nextView);
@@ -1548,29 +1747,42 @@ export default function App() {
               </div>
               <label className="graph-search"><span className="sr-only">Search graph</span><input value={graphSearch} onChange={(event) => setGraphSearch(event.target.value)} placeholder="Find a note or map" /></label>
             </div>
+            <div className="graph-legend" aria-label="Brain colours and link types">
+              {graphLegend.map((brain) => <span key={brain.id}><i style={{ "--legend-color": brain.color } as CSSProperties} />{brain.label}</span>)}
+              <span className="graph-legend__edge"><i />Cross-brain explicit link</span>
+            </div>
 
             <div className="graph-layout">
               <div className="graph-canvas" aria-label="Kairos whole brain graph">
                 <svg className="graph-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
                   {graphEdges.map((edge) => {
-                    const source = graphNodes.find((node) => node.id === edge.source);
-                    const target = graphNodes.find((node) => node.id === edge.target);
+                    const source = graphNodeById.get(edge.source);
+                    const target = graphNodeById.get(edge.target);
                     if (!source || !target) return null;
-                    return <line key={`${edge.source}-${edge.target}`} x1={source.x} y1={source.y} x2={target.x} y2={target.y} />;
+                    const kind = edge.kind?.toLowerCase() ?? "";
+                    const explicitLink = ["wiki_link", "markdown_link", "embed"].includes(kind);
+                    const crossBrain = explicitLink && source.brainId !== target.brainId && source.brainId !== "kairos" && target.brainId !== "kairos";
+                    return <line key={edge.id ?? `${edge.source}-${edge.target}-${edge.kind ?? ""}`} className={`${kind === "contains" ? "is-containment" : ""} ${kind === "tag" ? "is-tag" : ""} ${crossBrain ? "is-cross-brain" : ""}`} x1={source.x} y1={source.y} x2={target.x} y2={target.y} />;
                   })}
                 </svg>
                 {graphNodes.map((node) => {
                   const visual = brainVisual(node.brainId);
+                  const showLabel = selectedGraphNode === node.id || hoveredGraphNode === node.id || (Boolean(graphSearch.trim()) && graphNodes.length <= 8);
+                  const labelLeft = (node.x ?? 50) > 65;
                   return (
                     <button
                       key={node.id}
-                      className={`graph-node graph-node--${node.kind ?? "note"} ${selectedGraphNode === node.id ? "is-selected" : ""}`}
-                      style={{ "--node-color": visual.color, left: `${node.x}%`, top: `${node.y}%` } as CSSProperties}
+                      className={`graph-node graph-node--${node.kind ?? "note"} ${selectedGraphNode === node.id ? "is-selected" : ""} ${showLabel ? "shows-label" : ""} ${labelLeft ? "label-left" : ""}`}
+                      style={{ "--node-color": visual.color, left: `${node.x ?? 50}%`, top: `${node.y ?? 50}%` } as CSSProperties}
                       onClick={() => setSelectedGraphNode(node.id)}
+                      onMouseEnter={() => setHoveredGraphNode(node.id)}
+                      onMouseLeave={() => setHoveredGraphNode((current) => current === node.id ? null : current)}
+                      onFocus={() => setHoveredGraphNode(node.id)}
+                      onBlur={() => setHoveredGraphNode((current) => current === node.id ? null : current)}
                       title={`${node.label} · ${visual.label}`}
                     >
                       <span className="graph-node__dot" />
-                      <span>{node.label}</span>
+                      {showLabel && <span className="graph-node__label">{node.label}</span>}
                     </button>
                   );
                 })}
