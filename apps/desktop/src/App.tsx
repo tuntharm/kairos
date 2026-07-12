@@ -929,6 +929,13 @@ export default function App() {
       return (left.label ?? left.id).localeCompare(right.label ?? right.id);
     });
   }, [localSetup?.models, status?.model.choices, status?.model.installedModels, status?.model.selectedModel]);
+  const installedOllamaChoices = useMemo(
+    () => (status?.model.choices ?? []).filter((choice) => isInstalledModel(choice.id, status?.model.installedModels ?? [])),
+    [status?.model.choices, status?.model.installedModels],
+  );
+  const selectedComposerModel = installedOllamaChoices.some((choice) => choice.id === status?.model.selectedModel)
+    ? status?.model.selectedModel ?? ""
+    : "";
 
   const routeIcon = error ? routeError : briefResult
     ? briefResult.context.route.brains.length > 1 ? routeMulti : routeOne
@@ -1859,16 +1866,15 @@ export default function App() {
                   <label className="composer-select composer-select--model">
                     <span className="sr-only">Ollama model</span>
                     <select
-                      value={status?.model.selectedModel ?? ""}
+                      value={selectedComposerModel}
                       onChange={(event) => void selectModel(event.target.value)}
-                      disabled={!status || busy || Boolean(chatPreview) || !nativeRuntime}
+                      disabled={!status || busy || Boolean(chatPreview) || !nativeRuntime || installedOllamaChoices.length === 0}
                       aria-label="Ollama model"
                     >
                       {!status && <option value="">Checking local models…</option>}
-                      {status?.model.choices.map((choice) => {
-                        const installed = isInstalledModel(choice.id, status.model.installedModels);
-                        return <option key={choice.id} value={choice.id}>{choice.label}{installed ? "" : " · download required"}</option>;
-                      })}
+                      {status && installedOllamaChoices.length === 0 && <option value="">No installed local model</option>}
+                      {status && !selectedComposerModel && installedOllamaChoices.length > 0 && <option value="">Select an installed model…</option>}
+                      {installedOllamaChoices.map((choice) => <option key={choice.id} value={choice.id}>{choice.label}</option>)}
                     </select>
                   </label>
                 )}

@@ -1075,11 +1075,69 @@ fn extract_tags(markdown: &str) -> Vec<String> {
             continue;
         }
         let tag = markdown[start..end].trim_matches('/').to_lowercase();
-        if !tag.is_empty() && tag != "private" {
+        if !tag.is_empty()
+            && tag != "private"
+            && !tag
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_digit())
+            && !is_inline_style_hex_colour(markdown, *offset, &tag)
+        {
             tags.insert(tag);
         }
     }
     tags.into_iter().collect()
+}
+
+/// CSS colour values look exactly like compact Obsidian tags (for example,
+/// `background:#22C55E`). Only ignore them when they occur in an inline HTML
+/// `style` attribute: a standalone `#c0ffee` is still a valid tag.
+fn is_inline_style_hex_colour(markdown: &str, hash_offset: usize, tag: &str) -> bool {
+    if !matches!(tag.len(), 3 | 4 | 6 | 8)
+        || !tag.bytes().all(|character| character.is_ascii_hexdigit())
+    {
+        return false;
+    }
+
+    let before_hash = &markdown[..hash_offset];
+    if before_hash
+        .chars()
+        .rev()
+        .find(|character| !character.is_whitespace())
+        != Some(':')
+    {
+        return false;
+    }
+
+    let Some(open_tag_offset) = before_hash.rfind('<') else {
+        return false;
+    };
+    let open_tag = &before_hash[open_tag_offset..];
+    !open_tag.contains('>') && html_open_tag_has_style_attribute(open_tag)
+}
+
+fn html_open_tag_has_style_attribute(open_tag: &str) -> bool {
+    let bytes = open_tag.as_bytes();
+    let mut index = 0;
+    while index + b"style".len() <= bytes.len() {
+        if bytes[index..index + b"style".len()].eq_ignore_ascii_case(b"style") {
+            let has_name_boundary =
+                index == 0 || !is_html_attribute_name_character(bytes[index - 1]);
+            let mut next = index + b"style".len();
+            while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+                next += 1;
+            }
+            if has_name_boundary && bytes.get(next) == Some(&b'=') {
+                return true;
+            }
+        }
+        index += 1;
+    }
+    false
+}
+
+fn is_html_attribute_name_character(character: u8) -> bool {
+    character.is_ascii_alphanumeric() || matches!(character, b'-' | b'_' | b':')
 }
 
 fn is_tag_character(character: char) -> bool {
@@ -1337,6 +1395,28 @@ mod tests {
     }
 
     #[test]
+    fn graph_does_not_create_nodes_for_css_colours_or_digit_started_tags() {
+        let temp = TempDir::new("tag-noise");
+        temp.write(
+            "Map.md",
+            "<span style=\"background:#22C55E;border-color:#0f08\">Green</span> #1 #project/alpha #c0ffee",
+        );
+
+        let index = build_graph_index(&[source(&temp, &["Map.md"])], GraphBuildOptions::default());
+
+        assert!(
+            index
+                .nodes
+                .iter()
+                .any(|node| node.id == "tag:project/alpha")
+        );
+        assert!(index.nodes.iter().any(|node| node.id == "tag:c0ffee"));
+        assert!(!index.nodes.iter().any(|node| node.id == "tag:22c55e"));
+        assert!(!index.nodes.iter().any(|node| node.id == "tag:0f08"));
+        assert!(!index.nodes.iter().any(|node| node.id == "tag:1"));
+    }
+
+    #[test]
     fn cap_is_total_and_never_exceeds_the_hard_limit() {
         let temp = TempDir::new("cap");
         temp.write("A.md", "#one");
@@ -1410,5 +1490,19 @@ mod tests {
         assert!(!parsed.tags.contains(&"hidden".to_owned()));
         assert!(!parsed.tags.contains(&"code".to_owned()));
         assert!(!parsed.tags.contains(&"heading".to_owned()));
+    }
+
+    #[test]
+    fn parser_excludes_hex_colours_in_html_style_attributes_but_keeps_real_tags() {
+        let parsed = extract_explicit_references(
+            "#project/alpha #2026 #1\n<span style=\"background:#22C55E;border-color: #0f08\">Green</span>\n<span>#c0ffee</span>\n",
+        );
+
+        assert!(parsed.tags.contains(&"project/alpha".to_owned()));
+        assert!(parsed.tags.contains(&"c0ffee".to_owned()));
+        assert!(!parsed.tags.contains(&"2026".to_owned()));
+        assert!(!parsed.tags.contains(&"1".to_owned()));
+        assert!(!parsed.tags.contains(&"22c55e".to_owned()));
+        assert!(!parsed.tags.contains(&"0f08".to_owned()));
     }
 }
