@@ -5,6 +5,7 @@ import {
   forceSimulation,
   forceX,
   forceY,
+  type Force,
   type Simulation,
   type SimulationLinkDatum,
   type SimulationNodeDatum,
@@ -107,6 +108,19 @@ function isKairosNode(node: AtlasGraphNode) {
   return node.id === "kairos" || node.kind === "kairos";
 }
 
+function stableHash(value: string) {
+  let hash = 2_166_136_261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return hash >>> 0;
+}
+
+function seededUnit(value: string) {
+  return stableHash(value) / 4_294_967_295;
+}
+
 function seedPosition(node: AtlasGraphNode, pinnedPositions: AtlasPositions) {
   const pinned = pinnedPositions[node.id];
   return {
@@ -115,21 +129,50 @@ function seedPosition(node: AtlasGraphNode, pinnedPositions: AtlasPositions) {
   };
 }
 
-function clusterCentres(nodes: AtlasGraphNode[], pinnedPositions: AtlasPositions) {
-  const totals = new Map<string, { x: number; y: number; count: number }>();
-  nodes.forEach((node) => {
-    const key = node.brainId || node.clusterId || "unassigned";
-    const position = seedPosition(node, pinnedPositions);
-    const total = totals.get(key) ?? { x: 0, y: 0, count: 0 };
-    total.x += position.x;
-    total.y += position.y;
-    total.count += 1;
-    totals.set(key, total);
-  });
-  return new Map(Array.from(totals, ([key, total]) => [key, {
-    x: total.x / total.count,
-    y: total.y / total.count,
-  }]));
+function clusterCentres(nodes: AtlasGraphNode[]) {
+  const brainIds = Array.from(new Set(nodes.map((node) => node.brainId || node.clusterId || "unassigned")))
+    .sort((left, right) => left.localeCompare(right));
+  const phase = seededUnit(brainIds.join("|")) * Math.PI * 2;
+  const radius = brainIds.length <= 1 ? 0 : Math.min(22, 14 + brainIds.length * 2);
+  return new Map(brainIds.map((brainId, index) => {
+    const angle = phase + ((Math.PI * 2 * index) / brainIds.length);
+    return [brainId, {
+      x: 50 + Math.cos(angle) * radius,
+      y: 50 + Math.sin(angle) * radius,
+    }];
+  }));
+}
+
+function atlasBoundsForce(): Force<AtlasForceNode, undefined> {
+  let nodes: AtlasForceNode[] = [];
+  const min = 4;
+  const max = 96;
+  const force = (() => {
+    nodes.forEach((node) => {
+      if (node.fx === undefined || node.fx === null) {
+        if (node.x < min) {
+          node.x = min;
+          node.vx = Math.max(0, node.vx ?? 0) * 0.35;
+        } else if (node.x > max) {
+          node.x = max;
+          node.vx = Math.min(0, node.vx ?? 0) * 0.35;
+        }
+      }
+      if (node.fy === undefined || node.fy === null) {
+        if (node.y < min) {
+          node.y = min;
+          node.vy = Math.max(0, node.vy ?? 0) * 0.35;
+        } else if (node.y > max) {
+          node.y = max;
+          node.vy = Math.min(0, node.vy ?? 0) * 0.35;
+        }
+      }
+    });
+  }) as Force<AtlasForceNode, undefined>;
+  force.initialize = (nextNodes) => {
+    nodes = nextNodes;
+  };
+  return force;
 }
 
 export type AtlasPhysicsController = {
@@ -151,7 +194,7 @@ export function createAtlasPhysics(
   if (nodes.length === 0) return null;
 
   const degrees = meaningfulConnectionDegrees(nodes, graphEdges);
-  const centres = clusterCentres(nodes, pinnedPositions);
+  const centres = clusterCentres(nodes);
   const forceNodes: AtlasForceNode[] = nodes.map((node) => {
     const position = seedPosition(node, pinnedPositions);
     const centre = centres.get(node.brainId || node.clusterId || "unassigned") ?? position;
@@ -177,15 +220,16 @@ export function createAtlasPhysics(
       .id((node) => node.id)
       .distance(linkDistance)
       .strength(linkStrength))
-    .force("charge", forceManyBody<AtlasForceNode>().strength(-18).distanceMax(34))
+    .force("charge", forceManyBody<AtlasForceNode>().strength(-6).distanceMax(26))
     .force("collide", forceCollide<AtlasForceNode>()
-      .radius((node) => 1.5 + node.diameter / 8)
+      .radius((node) => 1 + node.diameter / 12)
       .strength(0.9)
       .iterations(2))
     .force("cluster-x", forceX<AtlasForceNode>((node) => node.clusterX)
-      .strength((node) => node.kind === "brain" ? 0.06 : 0.035))
+      .strength((node) => node.kind === "brain" ? 0.09 : 0.065))
     .force("cluster-y", forceY<AtlasForceNode>((node) => node.clusterY)
-      .strength((node) => node.kind === "brain" ? 0.06 : 0.035))
+      .strength((node) => node.kind === "brain" ? 0.09 : 0.065))
+    .force("bounds", atlasBoundsForce())
     .alphaDecay(0.052)
     .velocityDecay(0.48);
 
