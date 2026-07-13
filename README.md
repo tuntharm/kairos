@@ -1,109 +1,176 @@
 # Kairos
 
-Kairos is a macOS-first, chat-first control surface for a distributed personal
-knowledge system. It routes a question to approved Obsidian brains, retrieves a
-small cited context pack, and lets Tharm choose a local model, a consented cloud
-provider, or an explicitly invoked coding CLI.
+> A private-by-default desktop companion for asking questions across the notes
+> you deliberately connect.
 
-Kairos is not a second wiki. Connected notes remain the source of truth; its
-local chat history is a convenience, not shared memory for every AI tool.
+![Platform: macOS](https://img.shields.io/badge/platform-macOS-000000?logo=apple&logoColor=white)
+![Desktop: Tauri](https://img.shields.io/badge/desktop-Tauri-24C8DB?logo=tauri&logoColor=white)
+![Status: developer alpha](https://img.shields.io/badge/status-developer%20alpha-F59E0B)
+![License: not yet published](https://img.shields.io/badge/license-not%20yet%20published-64748B)
 
-## Core experience
+Kairos is a macOS app for working with a distributed personal knowledge system
+without turning it into another cloud service or another wiki. Connect one or
+more Obsidian folders, ask a question, and Kairos routes it to the appropriate
+approved brain, retrieves a small cited context pack, and lets you choose how
+to answer it.
 
-- Press `⌥ Space` to open a compact, persistent chat. Expand it into **Chat**,
-  **What Next**, **Brain Map**, and **Settings**.
-- **What Next** starts with a cross-brain pulse. A question that cannot be
-  routed safely asks for a brain instead of broadcasting it.
-- Replies identify the routed brain(s), cite retrieved note paths, and show the
-  state of any temporary attachments.
-- Closing can hide the app; the summon shortcut, launch-at-login, and whether
-  to reopen compact chat or the last surface are settings.
+Your notes remain in their original folders. Kairos owns the routing, consent,
+provenance, and local application settings—not your knowledge base.
+
+> **Status — developer alpha.** Kairos is currently a private, personalised
+> alpha. It is not yet a supported public download or a general-purpose
+> onboarding experience. See [Availability](#availability) before trying to
+> install it.
+
+## What it does
+
+- **Summon chat with `⌥ Space`.** Open a compact chat, then expand into Chat,
+  What Next, Brain Map, and Settings.
+- **Route before reading.** Questions are routed to registered brains; unclear
+  requests ask for a choice rather than broadcasting across every folder.
+- **Keep context bounded and cited.** Kairos retrieves approved, relevant note
+  excerpts and shows the routed brain(s) and source citations with a reply.
+- **Run local AI through Ollama.** It detects Ollama, guides setup, downloads
+  selected models in the app, and tests them at a 32K context window.
+- **Use other providers deliberately.** OpenAI, Anthropic, Codex CLI, and
+  Claude Code CLI remain modular options. Every non-local turn requires a
+  one-time preview before anything leaves the Mac.
+- **See a whole-brain atlas.** The metadata-only map shows brain clusters,
+  explicit Markdown links, tags, and cross-brain bridges—without copying note
+  bodies into the graph.
+- **Keep writing intentional.** Kairos can prepare Markdown create/edit
+  proposals only in an approved brain scope. You see the target path and diff
+  and explicitly confirm the change. It cannot delete, move, or run arbitrary
+  shell commands.
+
+## Privacy and safety model
+
+Kairos is designed around a simple boundary: **the user decides what is
+connected, retrieved, sent, and written.**
+
+| Boundary | Kairos behaviour |
+| --- | --- |
+| Connected notes | Indexed in place; Kairos does not copy or take ownership of vault notes. |
+| Private material | `90_Private`, `#private`, and `agent_access: explicit_only` are withheld by default. |
+| Local inference | Ollama is loopback-only at `http://localhost:11434`. |
+| Cloud/API/CLI turns | A per-turn preview shows the destination, selected content, temporary attachments, and model. No silent provider/model fallback. |
+| Uploads | Up to five temporary `.md`, `.txt`, `.pdf`, or `.docx` files (20 MB each); extracted text is discarded after the turn. |
+| Writes | Markdown create/edit only, inside registered allowed directories, using a bounded diff and short-lived confirmation nonce. |
+| Scoped execution | A time-limited session grant can be bound to one provider and one brain. It is never a grant to the Mac, shell, deletes, moves, private notes, or unreviewed egress. |
 
 ## Local model setup
 
-Kairos connects to Ollama only at `http://localhost:11434`. It detects whether
-Ollama is missing, installed but stopped, or running; shows available disk,
-model package size, 32K-context compatibility, download progress, cancel/retry,
-and a model test. If Ollama is absent it opens the official macOS installer;
-Kairos never asks a normal user to run a Terminal command and does not bundle
-Ollama or any model in its DMG.
+Kairos uses [Ollama](https://ollama.com/) for local models. The app can open the
+official Ollama installer when it is missing; after Ollama is running, models
+are downloaded through Ollama from within Kairos.
 
-- Starter default: `qwen3.6:35b-mlx`
-- Fast manual choice: `qwen3:8b`
-- Optional choices: `gpt-oss:20b`, `glm-4.7-flash`
-- Context: 32,768 tokens, kept by retrieval rather than lowering context or
-  inserting a whole vault
-- Memory budget: `Auto` detects the Mac (48 GB on this development Mac), with
-  `16 / 24 / 32 / 48 / 64 / 96 / 192 GB / Custom` choices. It is a planning
-  budget, not a statement about installed RAM.
+- The model selector is explicit—Kairos never silently changes model or lowers
+  the configured context window.
+- Recommendations are hardware-aware. Apple Silicon uses unified memory;
+  NVIDIA planning uses VRAM rather than extra system RAM.
+- The memory budget is a recommendation cap, not a claim about the machine’s
+  installed memory.
+- The default target is one **32K-context** conversation with conservative
+  headroom. Potentially runnable but tight models stay in the advanced catalog
+  until a real 32K test verifies them.
 
-The selected model and context are always explicit. Kairos never silently
-switches models, falls back to another provider, or reduces the context window.
+## Availability
 
-## Brains, privacy, and atlas
+### For general users
 
-Add a brain through the native folder picker, then confirm its name, routing
-hints, retrieval scope, graph inclusion, egress policy, and write policy.
-Kairos indexes in place and does not copy or own vault content.
+**Not yet.** There is currently no public GitHub Release, signed/notarized
+DMG, Homebrew cask, or generic first-run setup. A future public release will
+have a download link here and release notes with a verified checksum.
 
-- `90_Private`, `#private`, and `agent_access: explicit_only` are withheld from
-  retrieval, graph construction, and external context unless a future
-  path-scoped grant explicitly allows them.
-- The progressive Brain Map keeps Kairos at the centre and displays separate
-  brain clusters, explicit Markdown/wiki links, tags, and bridges. It caches
-  graph metadata only; it does not infer semantic links in v1.
-- Offline, moved, withheld, and capped sources remain visible as diagnostics.
+### For developers and maintainers
 
-## Providers and consent
-
-The provider layer is modular: local **Ollama**, direct **OpenAI API**, direct
-**Anthropic API**, installed **Codex CLI**, and installed **Claude Code CLI**.
-API keys live only in macOS Keychain. Coding-CLI handoffs are text-only,
-ephemeral, read-only, and require the already-installed CLI to be authenticated.
-
-Before every non-local turn, Kairos previews the exact outbound message,
-temporary-file extraction, selected note excerpts, destination, and model. A
-preview can be cancelled. `local_only` brains cannot send material through a
-cloud/API/CLI provider, and there is no provider or model fallback.
-
-## Chat, uploads, and note proposals
-
-Chats persist locally. A chat may attach up to five `.md`, `.txt`, `.pdf`, or
-`.docx` files of up to 20 MB each. Extraction stays in memory, is visibly marked
-temporary, and is discarded after the turn or when removed.
-
-Kairos can only propose Markdown **create** or **edit** operations in a brain's
-explicitly allowed directories. It shows the target path, a bounded diff, and
-before/after hashes; confirmation uses a short-lived one-time nonce and detects
-external changes. It cannot delete, move, create directories, or expose a raw
-filesystem/shell interface to the WebView.
-
-## Configuration
-
-`~/Library/Application Support/Kairos/brains.json` uses schema v3. The app
-atomically migrates a v2 registry and keeps `brains.v2.backup.json` beside it.
-The schema records app behaviour, typed provider configuration without secrets,
-brain policy, and local-model setup state.
-
-## Development
+The repository can be built on macOS for development. It requires a current
+Rust toolchain, Node.js with pnpm, and the usual macOS/Xcode command-line build
+tools for Tauri.
 
 ```bash
+git clone https://github.com/tuntharm/kairos.git
+cd kairos
 pnpm install
-cargo fmt --check
-cargo test --workspace
-pnpm --filter @kairos/desktop build
-pnpm --filter @kairos/desktop tauri dev
+pnpm desktop:dev
 ```
 
-Build a debug macOS bundle with:
+To create a production app bundle locally:
 
 ```bash
-pnpm --filter @kairos/desktop tauri build --debug
+pnpm desktop:build
+# Output: target/release/bundle/macos/Kairos.app
 ```
 
-## MCP
+The current alpha seeds a private development profile and local folder layout.
+That must be replaced by a generic first-run brain-onboarding flow before
+distributing the app to other people.
 
-`kairos-mcp` remains a local, route-only stdio bridge. It returns routing
-metadata rather than note contents or model answers, because an MCP host cannot
-give Kairos the per-turn consent guarantee provided by the desktop app. See
-[docs/mcp.md](docs/mcp.md).
+## Release and Homebrew roadmap
+
+`brew install --cask kairos` is a **distribution step**, not the first public
+release step. Before adding a cask, Kairos needs:
+
+1. A generic, zero-personal-data first-run experience.
+2. A public versioned GitHub Release with an app/DMG asset and SHA-256 checksum.
+3. Developer ID signing and Apple notarization for every release build.
+4. A published licence/EULA and privacy terms that match the intended business
+   model.
+5. A Homebrew cask in either `homebrew/cask` or a maintained
+   `tuntharm/homebrew-tap` that points to the immutable release asset.
+
+Until then, publishing a `brew` command would create an installation path that
+looks official but cannot yet give users a safe, maintainable release.
+
+## Architecture
+
+```text
+Tauri desktop app
+  ├─ policy-first kairos-core
+  │    ├─ brain routing and bounded retrieval
+  │    ├─ access, egress, and write policies
+  │    ├─ local-model recommendations and Ollama integration
+  │    └─ graph metadata and citations
+  ├─ local chat history and native macOS integrations
+  ├─ optional provider adapters
+  │    ├─ Ollama
+  │    ├─ OpenAI API / Anthropic API
+  │    └─ installed Codex CLI / Claude Code CLI
+  ├─ kairos-cli
+  └─ kairos-mcp (route-only, no note bodies)
+```
+
+| Path | Purpose |
+| --- | --- |
+| `apps/desktop/` | macOS Tauri desktop app and React interface |
+| `crates/kairos-core/` | Routing, policy, context, models, providers, graph, and write safeguards |
+| `crates/kairos-cli/` | Command-line interface |
+| `crates/kairos-mcp/` | Local route-only MCP server |
+| `docs/` | Supporting documentation, including [MCP details](docs/mcp.md) |
+
+## Development checks
+
+```bash
+cargo fmt --all --check
+cargo test --workspace
+pnpm --dir apps/desktop run build
+pnpm desktop:build
+```
+
+## Contributing and licence
+
+External contribution guidelines and a public licence have not yet been
+published. The repository is currently marked `UNLICENSED`; visibility of the
+source is not permission to redistribute it or ship derivative builds. If you
+would like to work with Kairos, please open an issue once the repository is
+public, or contact the maintainer through the repository profile.
+
+## Principles
+
+1. **Route before reading.** Context is intentional, not automatic scraping.
+2. **Local by default.** External providers are optional and consented.
+3. **Notes stay authoritative.** Kairos augments existing systems; it does not
+   replace them.
+4. **No invisible actions.** Every write and external handoff is explicit.
+5. **Useful now.** The goal is to surface the right context and next action at
+   the right moment.
