@@ -1,6 +1,6 @@
 {
-  "version": 2,
-  "sourceRouterPath": "/Users/you/.codex/brain_router.md",
+  "version": 3,
+  "sourceRouterPath": "/Users/you/Documents/Personal-Brain/00_System/Brain Manager.md",
   "localModel": {
     "ollamaEndpoint": "http://localhost:11434",
     "selectedModel": "qwen3.6:35b-mlx",
@@ -8,12 +8,12 @@
   },
   "brains": [
     {
-      "id": "everyday",
-      "name": "Everyday Life Brain",
+      "id": "personal-brain",
+      "name": "Personal Brain",
       "role": "everyday",
-      "rootPath": "/Users/you/everyday-life-brain",
-      "routerPaths": ["00_System/AI Brain Manager.md"],
-      "contextPaths": ["00_System/Tharm Model.md", "00_System/Current Context.md"],
+      "rootPath": "/Users/you/Documents/Personal-Brain",
+      "routerPaths": ["00_System/Brain Manager.md"],
+      "contextPaths": ["00_System/Current Context.md"],
       "enabled": true,
       "readPolicy": {
         "startupAllow": ["00_System/**/*.md"],

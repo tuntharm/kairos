@@ -9,11 +9,7 @@ import { listen } from "@tauri-apps/api/event";
 
 import brandMark from "../../../design/assets/brand/kairos-mark-gradient.svg";
 import brandWordmark from "../../../design/assets/brand/kairos-wordmark-dark.svg";
-import borderFiberCitation from "../../../design/assets/citations/border-fiber.svg";
-import datterCitation from "../../../design/assets/citations/datter.svg";
-import everydayCitation from "../../../design/assets/citations/everyday.svg";
 import fileCitation from "../../../design/assets/citations/file.svg";
-import phdCitation from "../../../design/assets/citations/phd.svg";
 import routeError from "../../../design/assets/routing/error.svg";
 import routeIdle from "../../../design/assets/routing/idle.svg";
 import routeMulti from "../../../design/assets/routing/routed-multi.svg";
@@ -329,61 +325,9 @@ const browserPreviewSetup: LocalSetupStatus = {
   memoryBudgetPlanningOnly: true,
 };
 
-const initialBrains: BrainRecord[] = [
-  {
-    id: "everyday",
-    name: "Everyday Life Brain",
-    role: "Life planning, people, routines, and projects",
-    rootPath: "~/everyday-life-brain",
-    enabled: true,
-    graphEnabled: true,
-    egressPolicy: "local_only",
-    writePolicy: "confirm_every_write",
-    status: "ready",
-  },
-  {
-    id: "phd",
-    name: "PhD / Research Brain",
-    role: "Research strategy and authoritative PhD context",
-    rootPath: "~/Library/CloudStorage/…/PhD - Surrogate Modelling",
-    enabled: true,
-    graphEnabled: true,
-    egressPolicy: "local_only",
-    writePolicy: "readonly",
-    status: "ready",
-  },
-  {
-    id: "datter",
-    name: "Datter AI",
-    role: "Data usefulness project memory",
-    rootPath: "~/dev/datter",
-    enabled: false,
-    graphEnabled: false,
-    egressPolicy: "local_only",
-    writePolicy: "readonly",
-    status: "offline",
-  },
-];
-
 const fallbackGraph: GraphSnapshot = {
-  nodes: [
-    { id: "kairos", label: "Kairos", brainId: "kairos", kind: "kairos", x: 50, y: 49 },
-    { id: "everyday-home", label: "Home", brainId: "everyday", kind: "map", x: 25, y: 27 },
-    { id: "everyday-routines", label: "Routines", brainId: "everyday", kind: "note", x: 18, y: 66 },
-    { id: "everyday-projects", label: "Life projects", brainId: "everyday", kind: "map", x: 35, y: 80 },
-    { id: "phd-context", label: "PhD context", brainId: "phd", kind: "map", x: 76, y: 27 },
-    { id: "phd-claims", label: "Research claims", brainId: "phd", kind: "note", x: 85, y: 64 },
-    { id: "bridge", label: "PhD bridge", brainId: "phd", kind: "bridge", x: 64, y: 80 },
-  ],
-  edges: [
-    { source: "kairos", target: "everyday-home" },
-    { source: "kairos", target: "everyday-routines" },
-    { source: "kairos", target: "phd-context" },
-    { source: "kairos", target: "phd-claims" },
-    { source: "everyday-home", target: "everyday-projects" },
-    { source: "phd-context", target: "phd-claims" },
-    { source: "phd-context", target: "bridge" },
-  ],
+  nodes: [{ id: "kairos", label: "Kairos", brainId: "kairos", kind: "kairos", x: 50, y: 49 }],
+  edges: [],
 };
 
 const modelCatalog: Record<string, { label: string; role: string; downloadSize: string; memoryBand: string; context: string }> = {
@@ -488,10 +432,6 @@ const kairosConsentModes: Array<{ id: KairosConsentMode; label: string; detail: 
 ];
 
 const brainVisuals: Record<string, BrainVisual> = {
-  everyday: { label: "Everyday", color: "#4C9FFF", icon: everydayCitation },
-  phd: { label: "PhD", color: "#9E7BFF", icon: phdCitation },
-  datter: { label: "Datter", color: "#49D7D2", icon: datterCitation },
-  "border-fiber": { label: "Border Fiber", color: "#FFB85C", icon: borderFiberCitation },
   kairos: { label: "Kairos", color: "#FFC766", icon: fileCitation },
 };
 
@@ -559,7 +499,6 @@ function defaultChatMessages(): ChatMessage[] {
     role: "assistant",
     body: "I’m Kairos. Ask what matters now, or use What Next for a cross-brain pulse. I route before I read.",
     createdAt: new Date().toISOString(),
-    routes: [{ id: "everyday", name: "Everyday Life Brain" }],
     notice: true,
   }];
 }
@@ -897,7 +836,7 @@ export default function App() {
   const [failedPullModel, setFailedPullModel] = useState<string | null>(null);
   const [setupFeedback, setSetupFeedback] = useState<string | null>(null);
   const [showAllModels, setShowAllModels] = useState(false);
-  const [brains, setBrains] = useState<BrainRecord[]>(initialBrains);
+  const [brains, setBrains] = useState<BrainRecord[]>([]);
   const [policyEditor, setPolicyEditor] = useState<BrainPolicyDraft | null>(null);
   const [policyBusy, setPolicyBusy] = useState(false);
   const [policyFeedback, setPolicyFeedback] = useState<string | null>(null);
@@ -929,7 +868,7 @@ export default function App() {
     contextWindowTokens: 32_768,
   });
   const [preferencesFeedback, setPreferencesFeedback] = useState<string | null>(null);
-  const [writeDraft, setWriteDraft] = useState({ brainId: "everyday", kind: "create" as "create" | "edit", relativePath: "01_Daily/Kairos Capture.md", markdown: "" });
+  const [writeDraft, setWriteDraft] = useState({ brainId: "", kind: "create" as "create" | "edit", relativePath: "Notes/Kairos Capture.md", markdown: "" });
   const [writeProposal, setWriteProposal] = useState<NoteWriteProposal | null>(null);
   const [writeBusy, setWriteBusy] = useState(false);
   const [writeFeedback, setWriteFeedback] = useState<string | null>(null);
@@ -1359,20 +1298,6 @@ export default function App() {
     if (view === "map") void refreshGraph();
     if (view === "settings") void refreshBrains();
   }, [view]);
-
-  const initialize = async () => {
-    if (!nativeRuntime) return;
-    setBusy(true);
-    setError(null);
-    try {
-      setStatus(await invoke<AppStatus>("initialize_tharm_profile"));
-      await refreshStatus();
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setBusy(false);
-    }
-  };
 
   const selectModel = async (model: string) => {
     if (!nativeRuntime) {
@@ -1814,6 +1739,10 @@ export default function App() {
       setAddBrain(null);
       await refreshBrains();
       await refreshGraph();
+      const created = normalizeBrains([result])?.[0];
+      if (created) {
+        setWriteDraft((current) => current.brainId ? current : { ...current, brainId: created.id });
+      }
     }
   };
 
@@ -2062,6 +1991,13 @@ export default function App() {
               </StatusPill>
             </div>
 
+            {!status?.initialized && (
+              <div className="setup-inline setup-inline--onboarding">
+                <div><strong>Connect your first brain.</strong><span>Choose an existing folder yourself. Kairos indexes in place, starts local-only, and does not copy your notes.</span></div>
+                <button className="primary-action" type="button" onClick={() => showView("settings")}>Set up Kairos</button>
+              </div>
+            )}
+
             <div className="chat-session-bar">
               <button className="secondary-action" type="button" onClick={() => void startNewChat()} disabled={busy}>New chat</button>
               {chatMessages.some((message) => !message.notice) && <button className="text-action" type="button" onClick={prepareChatLog} disabled={busy}>Save chat to brain</button>}
@@ -2271,7 +2207,7 @@ export default function App() {
               <div className="pulse-route-visual">{busy ? <KairosLoader /> : <img src={routeIcon} alt="" />}</div>
               <div>
                 <p className="section-label">{routeLabel}</p>
-                <h2>{briefResult ? briefResult.context.route.brains.map((brain) => brain.name).join(" + ") : "Everyday + PhD pulse"}</h2>
+                <h2>{briefResult ? briefResult.context.route.brains.map((brain) => brain.name).join(" + ") : "Your connected brains"}</h2>
                 <p>{briefResult ? "Only selected evidence was included." : "Kairos will route to the smallest useful set of enabled brains."}</p>
               </div>
               <div className="pulse-status">
@@ -2282,8 +2218,8 @@ export default function App() {
 
             {!status?.initialized && (
               <div className="setup-inline">
-                <div><strong>First, connect your existing brains.</strong><span>It creates a local registry only; your notes stay where they are.</span></div>
-                <button className="secondary-action" onClick={() => void initialize()} disabled={busy || !nativeRuntime}>Connect brains</button>
+                <div><strong>First, connect your existing brains.</strong><span>Choose each folder yourself; Kairos keeps notes in place and begins local-only.</span></div>
+                <button className="secondary-action" onClick={() => showView("settings")} disabled={busy || !nativeRuntime}>Set up Kairos</button>
               </div>
             )}
 

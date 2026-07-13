@@ -2,13 +2,13 @@
 
 ## One line
 
-Kairos is Tharm's summonable, local-first front door to distributed brains:
+Kairos is a summonable, local-first front door to distributed brains:
 ask once, get authoritative context, one useful next action, and the sources
 behind it.
 
-## Alpha user and job
+## Alpha job
 
-The first user is Tharm on this Mac. The alpha must answer:
+The alpha must answer:
 
 > What should I do next, and why?
 
@@ -36,7 +36,6 @@ Codex, Claude, and Cursor.
 ## Non-goals for the alpha
 
 - Accounts, sync, telemetry, or hosted backends.
-- Generic multi-user onboarding.
 - Cloud inference or automatic cloud fallback.
 - Hidden model substitution when a selected local model is unavailable.
 - Note mutations, attachment ingestion, wake words, or autonomous coding.

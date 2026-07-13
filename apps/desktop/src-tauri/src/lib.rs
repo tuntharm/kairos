@@ -36,7 +36,7 @@ use kairos_core::{
     WriteProposalOptions, WriteProposalStore, assess_local_model_fit_for_hardware, build_context,
     build_graph_index, canonicalize_allowed_file, chat_with_anthropic_api, chat_with_claude_cli,
     chat_with_codex_cli, chat_with_ollama, chat_with_openai_api, default_brain_read_policy,
-    default_config_path, default_tharm_config, enforce_content_egress, evaluate_access,
+    default_config_path, default_user_config, enforce_content_egress, evaluate_access,
     load_or_migrate_config, local_model_choices, local_model_profile, local_model_recommendations,
     ollama_status, pull_ollama_model as pull_model_from_ollama, render_chat_prompt,
     stream_chat_with_ollama, synthesize_ollama, test_ollama_model as test_local_ollama_model,
@@ -364,7 +364,7 @@ fn load_or_create_config() -> Result<(PathBuf, KairosConfig), String> {
     if path.exists() {
         return Ok((path.clone(), load_app_config(&path)?));
     }
-    let config = default_tharm_config().map_err(|error| error.to_string())?;
+    let config = default_user_config().map_err(|error| error.to_string())?;
     write_config(&path, &config, false).map_err(|error| error.to_string())?;
     Ok((path, config))
 }
@@ -500,8 +500,8 @@ async fn model_status(
 
 async fn status() -> Result<AppStatus, String> {
     let path = config_path()?;
-    let initialized = path.exists();
-    let config = if initialized {
+    let config_exists = path.exists();
+    let config = if config_exists {
         Some(load_app_config(&path)?)
     } else {
         None
@@ -517,7 +517,9 @@ async fn status() -> Result<AppStatus, String> {
     let capability = system::machine_capability();
     Ok(AppStatus {
         config_path: path.display().to_string(),
-        initialized,
+        initialized: config
+            .as_ref()
+            .is_some_and(|config| !config.brains.is_empty()),
         model: model_status(&settings, &local_setup, &capability).await,
         app: config
             .as_ref()
@@ -776,10 +778,10 @@ async fn set_hardware_profile(
 }
 
 #[tauri::command]
-async fn initialize_tharm_profile() -> Result<AppStatus, String> {
+async fn initialize_user_profile() -> Result<AppStatus, String> {
     let path = config_path()?;
     if !path.exists() {
-        let config = default_tharm_config().map_err(|error| error.to_string())?;
+        let config = default_user_config().map_err(|error| error.to_string())?;
         write_config(&path, &config, false).map_err(|error| error.to_string())?;
     }
     status().await
@@ -2076,6 +2078,9 @@ fn brain_view(brain: &BrainRecord) -> BrainView {
 #[tauri::command]
 fn list_brains() -> Result<Vec<BrainView>, String> {
     let path = config_path()?;
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
     let config = load_app_config(&path)?;
     Ok(config.brains.iter().map(brain_view).collect())
 }
@@ -2600,7 +2605,7 @@ pub fn run() {
             local_setup_status,
             set_memory_budget,
             set_hardware_profile,
-            initialize_tharm_profile,
+            initialize_user_profile,
             set_selected_model,
             pull_ollama_model,
             cancel_ollama_pull,

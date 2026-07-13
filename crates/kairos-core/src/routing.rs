@@ -43,8 +43,8 @@ const BRIEF_HINTS: &[&str] = &[
 ];
 
 /// Internal query used only by the What Next dashboard. It deliberately
-/// selects the Everyday and PhD context together when both are available;
-/// ordinary mixed questions continue to avoid broadcasting into both brains.
+/// selects up to two user-enabled brains; ordinary mixed questions continue to
+/// avoid broadcasting across every connected folder.
 pub const CROSS_BRAIN_PULSE_QUERY: &str =
     "kairos cross-brain pulse: personal everyday life and phd research priorities";
 
@@ -125,6 +125,21 @@ pub fn route_query(
         })
         .collect();
 
+    if is_cross_brain_pulse {
+        unavailable_brains.clear();
+        candidates = config
+            .brains
+            .iter()
+            .filter_map(|brain| {
+                if !brain.enabled {
+                    unavailable_brains.push(brain.id.clone());
+                    return None;
+                }
+                Some((score(brain, &lower).max(1), brain))
+            })
+            .collect();
+    }
+
     // Everyday is the helpful fallback, not automatic extra context for a
     // clearly-owned specialist question such as Abaqus/PhD work.
     if !is_cross_brain_pulse
@@ -181,40 +196,82 @@ pub fn route_query(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::default_tharm_config;
+    use crate::{
+        BrainRecord, BrainRole, EgressPolicy, WritePolicy, default_brain_read_policy,
+        default_user_config,
+    };
+
+    fn config_with_brains() -> crate::KairosConfig {
+        let mut config = default_user_config().unwrap();
+        config.brains = vec![
+            BrainRecord {
+                id: "personal".to_owned(),
+                name: "Personal brain".to_owned(),
+                role: BrainRole::Everyday,
+                root_path: std::env::temp_dir(),
+                router_paths: Vec::new(),
+                context_paths: Vec::new(),
+                routing_hints: vec!["today".to_owned(), "personal".to_owned()],
+                enabled: true,
+                read_policy: default_brain_read_policy(),
+                egress_policy: EgressPolicy::LocalOnly,
+                write_policy: WritePolicy::ReadOnly,
+                write_directories: Vec::new(),
+                graph_enabled: true,
+                graph_include_patterns: vec!["**/*.md".to_owned()],
+            },
+            BrainRecord {
+                id: "research".to_owned(),
+                name: "Research brain".to_owned(),
+                role: BrainRole::Phd,
+                root_path: std::env::temp_dir(),
+                router_paths: Vec::new(),
+                context_paths: Vec::new(),
+                routing_hints: vec!["research".to_owned(), "abaqus".to_owned()],
+                enabled: true,
+                read_policy: default_brain_read_policy(),
+                egress_policy: EgressPolicy::LocalOnly,
+                write_policy: WritePolicy::ReadOnly,
+                write_directories: Vec::new(),
+                graph_enabled: true,
+                graph_include_patterns: vec!["**/*.md".to_owned()],
+            },
+        ];
+        config
+    }
 
     #[test]
     fn phd_language_routes_to_phd() {
-        let config = default_tharm_config().unwrap();
+        let config = config_with_brains();
         let result =
             route_query(&config, "What Abaqus plate experiment comes next?", None).unwrap();
-        assert_eq!(result.brains.first().unwrap().id, "phd");
+        assert_eq!(result.brains.first().unwrap().id, "research");
         assert_eq!(result.brains.len(), 1);
     }
 
     #[test]
-    fn morning_question_stays_in_everyday_context() {
-        let config = default_tharm_config().unwrap();
+    fn personal_question_stays_in_registered_personal_context() {
+        let config = config_with_brains();
         let result = route_query(&config, "What should I do today?", None).unwrap();
-        assert_eq!(result.brains.first().unwrap().id, "everyday");
+        assert_eq!(result.brains.first().unwrap().id, "personal");
     }
 
     #[test]
     fn cross_brain_pulse_intentionally_uses_everyday_and_phd_without_ambiguity() {
-        let config = default_tharm_config().unwrap();
+        let config = config_with_brains();
         let result = route_query(&config, CROSS_BRAIN_PULSE_QUERY, None).unwrap();
         let ids = result
             .brains
             .iter()
             .map(|brain| brain.id.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(ids, vec!["everyday", "phd"]);
+        assert_eq!(ids, vec!["personal", "research"]);
         assert!(!result.requires_choice);
     }
 
     #[test]
     fn registered_routing_hints_support_new_brains_without_hard_coding() {
-        let mut config = default_tharm_config().unwrap();
+        let mut config = config_with_brains();
         let mut brain = config.brains[0].clone();
         brain.id = "creative".to_owned();
         brain.name = "Creative Brain".to_owned();

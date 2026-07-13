@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 use kairos_core::{
-    ContentDestination, ContextPack, build_context, default_config_path, default_tharm_config,
+    ContentDestination, ContextPack, build_context, default_config_path, default_user_config,
     enforce_content_egress, load_or_migrate_config, ollama_status, render_handoff, route_query,
     synthesize_ollama, write_config,
 };
@@ -19,7 +19,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Write the personal Tharm profile to Application Support/Kairos.
+    /// Create an empty local Kairos registry. Add brains through the desktop app.
     Init {
         #[arg(long)]
         force: bool,
@@ -88,9 +88,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match &cli.command {
         Command::Init { force } => {
             let path = config_path(&cli)?;
-            let config = default_tharm_config()?;
+            let config = default_user_config()?;
             write_config(&path, &config, *force)?;
-            println!("Initialized Kairos profile at {}", path.display());
+            println!("Initialized an empty Kairos registry at {}", path.display());
         }
         Command::Doctor => {
             let path = config_path(&cli)?;

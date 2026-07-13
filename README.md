@@ -17,10 +17,18 @@ to answer it.
 Your notes remain in their original folders. Kairos owns the routing, consent,
 provenance, and local application settings—not your knowledge base.
 
-> **Status — developer alpha.** Kairos is currently a private, personalised
-> alpha. It is not yet a supported public download or a general-purpose
-> onboarding experience. See [Availability](#availability) before trying to
-> install it.
+<p align="center">
+  <img src="docs/assets/kairos-hero-mockup.png" alt="Conceptual Kairos desktop interface with a compact chat and connected-brain atlas" width="100%">
+</p>
+
+<p align="center">
+  <sub>Product concept — compact chat, explicit routing, and a privacy-aware whole-brain atlas.</sub>
+</p>
+
+> **Status — developer alpha.** Kairos starts with an empty local registry:
+> each person chooses their own folders and policies. It is not yet a supported
+> public download; see [Availability](#availability) before trying to install
+> it.
 
 ## What it does
 
@@ -79,8 +87,8 @@ are downloaded through Ollama from within Kairos.
 ### For general users
 
 **Not yet.** There is currently no public GitHub Release, signed/notarized
-DMG, Homebrew cask, or generic first-run setup. A future public release will
-have a download link here and release notes with a verified checksum.
+DMG, or Homebrew cask. A future public release will have a download link here
+and release notes with a verified checksum.
 
 ### For developers and maintainers
 
@@ -102,9 +110,9 @@ pnpm desktop:build
 # Output: target/release/bundle/macos/Kairos.app
 ```
 
-The current alpha seeds a private development profile and local folder layout.
-That must be replaced by a generic first-run brain-onboarding flow before
-distributing the app to other people.
+The app starts with no connected brain. Use **Settings → Add brain** to choose
+an existing Obsidian folder and review its local retrieval, graph, egress, and
+write policies before Kairos can read anything.
 
 ## Release and Homebrew roadmap
 

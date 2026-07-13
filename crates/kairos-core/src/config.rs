@@ -1706,129 +1706,18 @@ pub fn default_brain_read_policy() -> ReadPolicy {
     }
 }
 
-/// Seed a profile for this private alpha. It is never written automatically.
-pub fn default_tharm_config() -> Result<KairosConfig> {
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| CoreError::InvalidPath("HOME is not available".to_owned()))?;
-    let everyday_root = home.join("everyday-life-brain");
-    let phd_root = home
-        .join("Library/CloudStorage/OneDrive-ImperialCollegeLondon/PhD/PhD - Surrogate Modelling");
-    let datter_root = home.join("dev/datter");
-    let border_root = home.join("border-fiber-ids");
-
-    let everyday = BrainRecord {
-        id: "everyday".to_owned(),
-        name: "Everyday Life Brain".to_owned(),
-        role: BrainRole::Everyday,
-        root_path: everyday_root,
-        router_paths: vec!["00_System/AI Brain Manager.md".to_owned()],
-        context_paths: vec![
-            "00_System/Tharm Model.md".to_owned(),
-            "00_System/Current Context.md".to_owned(),
-        ],
-        routing_hints: vec![
-            "life".to_owned(),
-            "personal".to_owned(),
-            "today".to_owned(),
-            "admin".to_owned(),
-        ],
-        enabled: true,
-        read_policy: default_brain_read_policy(),
-        egress_policy: EgressPolicy::LocalOnly,
-        write_policy: WritePolicy::ProposeConfirm,
-        write_directories: vec![
-            "01_Daily".to_owned(),
-            "02_Projects".to_owned(),
-            "03_People".to_owned(),
-            "04_Areas".to_owned(),
-            "05_Knowledge".to_owned(),
-            "07_Decisions".to_owned(),
-        ],
-        graph_enabled: true,
-        graph_include_patterns: default_graph_include_patterns(),
-    };
-
-    let phd = BrainRecord {
-        id: "phd".to_owned(),
-        name: "PhD Research Brain".to_owned(),
-        role: BrainRole::Phd,
-        root_path: phd_root,
-        router_paths: vec!["00_System/AI Second Brain Manager.md".to_owned()],
-        context_paths: vec!["00_System/PhD Current Context.md".to_owned()],
-        routing_hints: vec![
-            "phd".to_owned(),
-            "research".to_owned(),
-            "abaqus".to_owned(),
-            "surrogate".to_owned(),
-        ],
-        enabled: true,
-        read_policy: default_brain_read_policy(),
-        egress_policy: EgressPolicy::LocalOnly,
-        write_policy: WritePolicy::ReadOnly,
-        write_directories: Vec::new(),
-        graph_enabled: true,
-        graph_include_patterns: default_graph_include_patterns(),
-    };
-
-    let datter = BrainRecord {
-        id: "datter".to_owned(),
-        name: "Datter AI".to_owned(),
-        role: BrainRole::Project,
-        root_path: datter_root,
-        router_paths: vec!["brain/00_System/Datter Brain Manager.md".to_owned()],
-        context_paths: vec!["brain/00_System/Project Map.md".to_owned()],
-        routing_hints: vec![
-            "datter".to_owned(),
-            "data usefulness".to_owned(),
-            "token waste".to_owned(),
-        ],
-        enabled: false,
-        read_policy: ReadPolicy {
-            startup_allow: vec!["brain/00_System/**/*.md".to_owned()],
-            ..default_brain_read_policy()
-        },
-        egress_policy: EgressPolicy::LocalOnly,
-        write_policy: WritePolicy::ReadOnly,
-        write_directories: Vec::new(),
-        graph_enabled: true,
-        graph_include_patterns: default_graph_include_patterns(),
-    };
-
-    let border = BrainRecord {
-        id: "border-fiber".to_owned(),
-        name: "Border Fiber IDS".to_owned(),
-        role: BrainRole::Project,
-        root_path: border_root,
-        router_paths: vec!["PRODUCT.md".to_owned(), "AGENTS.md".to_owned()],
-        context_paths: Vec::new(),
-        routing_hints: vec![
-            "border fiber".to_owned(),
-            "fiber ids".to_owned(),
-            "phi-otdr".to_owned(),
-            "das".to_owned(),
-        ],
-        enabled: false,
-        read_policy: ReadPolicy {
-            explicit_only_patterns: vec!["**".to_owned()],
-            deny_patterns: vec!["**".to_owned()],
-            ..default_brain_read_policy()
-        },
-        egress_policy: EgressPolicy::LocalOnly,
-        write_policy: WritePolicy::Prohibited,
-        write_directories: Vec::new(),
-        graph_enabled: false,
-        graph_include_patterns: default_graph_include_patterns(),
-    };
-
+/// Create an empty local registry. A new installation never guesses folders,
+/// imports notes, or includes a developer's paths; a person adds each brain
+/// through the native picker and explicitly approves its policy.
+pub fn default_user_config() -> Result<KairosConfig> {
     Ok(KairosConfig {
         version: CURRENT_CONFIG_VERSION,
-        source_router_path: home.join(".codex/brain_router.md"),
+        source_router_path: PathBuf::new(),
         local_model: LocalModelSettings::default(),
         app: AppSettings::default(),
         inference: InferenceSettings::default(),
         local_setup: LocalSetupSettings::default(),
-        brains: vec![everyday, phd, datter, border],
+        brains: Vec::new(),
     })
 }
 
@@ -1836,12 +1725,38 @@ pub fn default_tharm_config() -> Result<KairosConfig> {
 mod tests {
     use super::*;
 
+    fn test_brain(id: &str) -> BrainRecord {
+        BrainRecord {
+            id: id.to_owned(),
+            name: "Test brain".to_owned(),
+            role: BrainRole::Other,
+            root_path: std::env::temp_dir(),
+            router_paths: Vec::new(),
+            context_paths: Vec::new(),
+            routing_hints: Vec::new(),
+            enabled: true,
+            read_policy: default_brain_read_policy(),
+            egress_policy: EgressPolicy::LocalOnly,
+            write_policy: WritePolicy::ProposeConfirm,
+            write_directories: vec!["Notes".to_owned()],
+            graph_enabled: true,
+            graph_include_patterns: vec!["**/*.md".to_owned()],
+        }
+    }
+
     #[test]
     fn default_local_model_uses_32k_and_the_requested_primary_model() {
         let settings = LocalModelSettings::default();
         assert_eq!(settings.ollama_endpoint, DEFAULT_OLLAMA_ENDPOINT);
         assert_eq!(settings.selected_model, DEFAULT_LOCAL_MODEL);
         assert_eq!(settings.context_window_tokens, 32_768);
+    }
+
+    #[test]
+    fn default_user_config_is_empty_and_does_not_guess_any_personal_paths() {
+        let config = default_user_config().unwrap();
+        assert!(config.brains.is_empty());
+        assert!(config.source_router_path.as_os_str().is_empty());
     }
 
     #[test]
@@ -2379,13 +2294,10 @@ mod tests {
         ));
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join("brains.json");
-        let mut legacy = default_tharm_config().unwrap();
+        let mut legacy = default_user_config().unwrap();
         legacy.version = 2;
-        let everyday = legacy
-            .brains
-            .iter_mut()
-            .find(|brain| brain.id == "everyday")
-            .unwrap();
+        legacy.brains.push(test_brain("test"));
+        let everyday = legacy.brains.first_mut().unwrap();
         everyday.write_policy = WritePolicy::ReadOnly;
         everyday.write_directories.clear();
         fs::write(&path, serde_json::to_string_pretty(&legacy).unwrap()).unwrap();
@@ -2394,7 +2306,7 @@ mod tests {
         let everyday = migrated
             .brains
             .iter()
-            .find(|brain| brain.id == "everyday")
+            .find(|brain| brain.id == "test")
             .unwrap();
         assert_eq!(everyday.write_policy, WritePolicy::ReadOnly);
         assert!(everyday.write_directories.is_empty());
@@ -2447,7 +2359,7 @@ mod tests {
         ));
         fs::create_dir_all(&directory).unwrap();
         let path = directory.join("brains.json");
-        let mut config = default_tharm_config().unwrap();
+        let mut config = default_user_config().unwrap();
         config.version = CURRENT_CONFIG_VERSION + 1;
         let contents = serde_json::to_vec(&config).unwrap();
         fs::write(&path, &contents).unwrap();

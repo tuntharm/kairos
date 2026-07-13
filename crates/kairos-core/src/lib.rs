@@ -21,7 +21,7 @@ pub use config::{
     LocalModelVerification, LocalSetupSettings, MEMORY_BUDGET_PRESETS_GB, MemoryBudgetMode,
     OPTIONAL_LOCAL_MODELS, ProviderConfig, ProviderKind, ReadPolicy, SummonTarget, WritePolicy,
     application_support_dir, assess_local_model_fit, assess_local_model_fit_for_hardware,
-    default_brain_read_policy, default_config_path, default_tharm_config, load_config,
+    default_brain_read_policy, default_config_path, default_user_config, load_config,
     load_or_migrate_config, local_model_choices, local_model_profile, local_model_profiles,
     local_model_recommendations, migration_backup_path, write_config,
 };
