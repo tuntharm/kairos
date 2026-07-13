@@ -277,13 +277,15 @@ type StoredChatSession = ChatSessionSummary & {
 
 type ProviderId = "ollama" | "openai" | "anthropic" | "codex-cli" | "claude-cli";
 type ViewId = "chat" | "next" | "map" | "settings";
-type NavId = ViewId | "history" | "brains" | "privacy";
+type NavId = "history" | "next" | "settings";
 type SurfaceMode = "compact" | "cockpit";
 type SettingsAnchor = "top" | "brains" | "privacy" | "writes";
 type MemoryBudget = "auto" | "custom" | 16 | 24 | 32 | 48 | 64 | 96 | 192;
 type KairosConsentMode = "ask" | "approve_local" | "full_kairos";
 type ScopedExecutionGrant = { token: string; brainId: string; providerId: ProviderId; sessionId: string; expiresAt: string };
 type GraphCamera = { scale: number; x: number; y: number };
+type GraphPosition = { x: number; y: number };
+type ManualGraphPositions = Record<string, GraphPosition>;
 
 type BrainVisual = { label: string; color: string; icon: string };
 
@@ -292,6 +294,7 @@ const ollamaInstallUrl = "https://ollama.com/download/mac";
 const graphCameraFit: GraphCamera = { scale: 1, x: 0, y: 0 };
 const graphZoomMin = 0.6;
 const graphZoomMax = 3;
+const graphManualLayoutStorageKey = "kairos.graph-manual-layout.v1";
 
 const browserPreviewStatus: AppStatus = {
   configPath: "Browser preview",
@@ -573,6 +576,24 @@ function isKairosGraphNode(node: GraphNode) {
 
 function clampGraphCoordinate(value: number) {
   return Math.max(1, Math.min(99, value));
+}
+
+function readManualGraphPositions(): ManualGraphPositions {
+  if (typeof window === "undefined") return {};
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(graphManualLayoutStorageKey) ?? "{}");
+    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return {};
+    return Object.fromEntries(Object.entries(stored).flatMap(([nodeId, position]) => {
+      const record = asRecord(position);
+      if (!record || typeof record.x !== "number" || typeof record.y !== "number") return [];
+      return [[nodeId, {
+        x: clampGraphCoordinate(record.x),
+        y: clampGraphCoordinate(record.y),
+      }]];
+    }));
+  } catch {
+    return {};
+  }
 }
 
 function seededUnit(value: string) {
@@ -863,8 +884,19 @@ export default function App() {
   const [graphCamera, setGraphCamera] = useState<GraphCamera>(graphCameraFit);
   const [previousGraphCamera, setPreviousGraphCamera] = useState<GraphCamera | null>(null);
   const [graphViewportSize, setGraphViewportSize] = useState({ width: 1, height: 1 });
+  const [manualGraphPositions, setManualGraphPositions] = useState<ManualGraphPositions>(readManualGraphPositions);
   const graphCanvasRef = useRef<HTMLDivElement | null>(null);
   const graphDragRef = useRef<{ pointerId: number; startX: number; startY: number; camera: GraphCamera } | null>(null);
+  const graphNodeDragRef = useRef<{
+    pointerId: number;
+    nodeId: string;
+    startClientX: number;
+    startClientY: number;
+    startPosition: GraphPosition;
+    scale: number;
+    moved: boolean;
+  } | null>(null);
+  const suppressGraphNodeClickRef = useRef<string | null>(null);
   const [addBrain, setAddBrain] = useState<{
     selectionToken: string;
     displayPath?: string;
@@ -1123,6 +1155,14 @@ export default function App() {
   useEffect(() => {
     void refreshStatus();
   }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(graphManualLayoutStorageKey, JSON.stringify(manualGraphPositions));
+    } catch {
+      // Node arrangement remains usable for this session if local storage is unavailable.
+    }
+  }, [manualGraphPositions]);
 
   useEffect(() => {
     const mode = localSetup?.memoryBudgetMode;
@@ -1935,12 +1975,17 @@ export default function App() {
     setWriteBusy(false);
   };
 
-  const graphNodes = useMemo(() => graph.nodes.filter((node) => {
-    const matchesBrain = graphFilter === "all" || node.brainId === graphFilter || node.id === "kairos";
-    const needle = graphSearch.trim().toLowerCase();
-    const matchesSearch = isKairosGraphNode(node) || !needle || node.label.toLowerCase().includes(needle);
-    return matchesBrain && matchesSearch && !node.protected;
-  }), [graph, graphFilter, graphSearch]);
+  const graphNodes = useMemo(() => graph.nodes
+    .filter((node) => {
+      const matchesBrain = graphFilter === "all" || node.brainId === graphFilter || node.id === "kairos";
+      const needle = graphSearch.trim().toLowerCase();
+      const matchesSearch = isKairosGraphNode(node) || !needle || node.label.toLowerCase().includes(needle);
+      return matchesBrain && matchesSearch && !node.protected;
+    })
+    .map((node) => {
+      const manualPosition = manualGraphPositions[node.id];
+      return manualPosition && !isKairosGraphNode(node) ? { ...node, ...manualPosition } : node;
+    }), [graph, graphFilter, graphSearch, manualGraphPositions]);
   const graphNodeIds = new Set(graphNodes.map((node) => node.id));
   const graphEdges = graph.edges.filter((edge) => graphNodeIds.has(edge.source) && graphNodeIds.has(edge.target));
   const graphNodeById = useMemo(() => new Map(graphNodes.map((node) => [node.id, node])), [graphNodes]);
@@ -2021,7 +2066,43 @@ export default function App() {
     };
     event.currentTarget.setPointerCapture(event.pointerId);
   };
+  const handleGraphNodePointerDown = (event: ReactPointerEvent<HTMLButtonElement>, node: GraphNode) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    graphNodeDragRef.current = {
+      pointerId: event.pointerId,
+      nodeId: node.id,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      startPosition: { x: node.x ?? 50, y: node.y ?? 50 },
+      scale: graphCamera.scale,
+      moved: false,
+    };
+    graphCanvasRef.current?.setPointerCapture(event.pointerId);
+  };
+  const handleGraphNodeClick = (node: GraphNode) => {
+    if (suppressGraphNodeClickRef.current === node.id) {
+      suppressGraphNodeClickRef.current = null;
+      return;
+    }
+    focusGraphNode(node);
+  };
   const handleGraphPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const nodeDrag = graphNodeDragRef.current;
+    if (nodeDrag?.pointerId === event.pointerId) {
+      const deltaX = event.clientX - nodeDrag.startClientX;
+      const deltaY = event.clientY - nodeDrag.startClientY;
+      if (Math.hypot(deltaX, deltaY) > 3) nodeDrag.moved = true;
+      setManualGraphPositions((current) => ({
+        ...current,
+        [nodeDrag.nodeId]: {
+          x: clampGraphCoordinate(nodeDrag.startPosition.x + (deltaX / (graphViewportSize.width * nodeDrag.scale)) * 100),
+          y: clampGraphCoordinate(nodeDrag.startPosition.y + (deltaY / (graphViewportSize.height * nodeDrag.scale)) * 100),
+        },
+      }));
+      return;
+    }
     const drag = graphDragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
     setGraphCamera({
@@ -2031,6 +2112,18 @@ export default function App() {
     });
   };
   const finishGraphPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const nodeDrag = graphNodeDragRef.current;
+    if (nodeDrag?.pointerId === event.pointerId) {
+      if (nodeDrag.moved) {
+        suppressGraphNodeClickRef.current = nodeDrag.nodeId;
+        window.setTimeout(() => {
+          if (suppressGraphNodeClickRef.current === nodeDrag.nodeId) suppressGraphNodeClickRef.current = null;
+        }, 0);
+      }
+      graphNodeDragRef.current = null;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+      return;
+    }
     if (graphDragRef.current?.pointerId !== event.pointerId) return;
     graphDragRef.current = null;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
@@ -2149,34 +2242,17 @@ export default function App() {
         {expanded && (
           <nav className="primary-nav" aria-label="Kairos sections">
             {([
-              ["chat", "Cockpit", "⌁"],
               ["history", "Chat history", "◌"],
               ["next", "What Next", "✦"],
-              ["map", "Brain Map", "⌘"],
-              ["brains", "Connected brains", "▱"],
-              ["privacy", "Privacy and providers", "◇"],
               ["settings", "Settings", "⚙"],
             ] as Array<[NavId, string, string]>).map(([id, label, icon]) => (
               <button
                 key={id}
-                className={`nav-button ${(
-                  id === "history"
-                    ? historyOpen
-                    : id === "brains" || id === "privacy"
-                      ? view === "settings" && settingsAnchor === id
-                      : id === "settings"
-                        ? view === "settings" && settingsAnchor === "top"
-                        : view === id
-                ) ? "is-active" : ""}`}
+                className={`nav-button ${(id === "history" ? historyOpen : view === id) ? "is-active" : ""}`}
                 onClick={() => {
                   if (id === "history") {
                     setView("chat");
                     setHistoryOpen((open) => !open);
-                  } else if (id === "brains" || id === "privacy") {
-                    setHistoryOpen(false);
-                    setSettingsAnchor(id);
-                    setView("settings");
-                    setSurfaceMode("cockpit");
                   } else {
                     setHistoryOpen(false);
                     showView(id);
@@ -2505,7 +2581,10 @@ export default function App() {
                 <h1>See the shape of your memory.</h1>
                 <p>Explicit Markdown links, tags, and registered bridges only. Protected notes never appear here.</p>
               </div>
-              <button className="secondary-action" onClick={() => void refreshGraph()} disabled={graphBusy}>{graphBusy ? "Refreshing…" : "Refresh metadata"}</button>
+              <div className="surface-heading__actions">
+                <button className="text-action graph-reset-layout" type="button" onClick={() => setManualGraphPositions({})} disabled={Object.keys(manualGraphPositions).length === 0}>Reset positions</button>
+                <button className="secondary-action" onClick={() => void refreshGraph()} disabled={graphBusy}>{graphBusy ? "Refreshing…" : "Refresh metadata"}</button>
+              </div>
             </div>
 
             <div className="graph-toolbar">
@@ -2515,6 +2594,7 @@ export default function App() {
                   <button key={brain.id} className={graphFilter === brain.id ? "is-active" : ""} onClick={() => setGraphFilter(brain.id)}>{brain.name.replace(" Brain", "")}</button>
                 ))}
               </div>
+              <span className="graph-drag-hint">Drag nodes · saved locally</span>
               <label className="graph-search"><span className="sr-only">Search graph</span><input value={graphSearch} onChange={(event) => setGraphSearch(event.target.value)} placeholder="Find a note or map" /></label>
             </div>
             <div className="graph-legend" aria-label="Brain colours and link types">
@@ -2565,12 +2645,13 @@ export default function App() {
                       key={node.id}
                       className={`graph-node graph-node--${node.kind ?? "note"} ${selectedGraphNode === node.id ? "is-selected" : ""} ${showLabel ? "shows-label" : ""} ${labelLeft ? "label-left" : ""}`}
                       style={{ "--node-color": visual.color, left: `${node.x ?? 50}%`, top: `${node.y ?? 50}%` } as CSSProperties}
-                      onClick={() => focusGraphNode(node)}
+                      onPointerDown={(event) => handleGraphNodePointerDown(event, node)}
+                      onClick={() => handleGraphNodeClick(node)}
                       onMouseEnter={() => setHoveredGraphNode(node.id)}
                       onMouseLeave={() => setHoveredGraphNode((current) => current === node.id ? null : current)}
                       onFocus={() => setHoveredGraphNode(node.id)}
                       onBlur={() => setHoveredGraphNode((current) => current === node.id ? null : current)}
-                      title={`${node.label} · ${visual.label}`}
+                      title={`Drag to arrange · ${node.label} · ${visual.label}`}
                     >
                       <span className="graph-node__dot" />
                       {showLabel && <span className="graph-node__label">{node.label}</span>}
