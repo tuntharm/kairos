@@ -529,6 +529,7 @@ pre { max-height: 210px; overflow: auto; margin: 0; border-top: 1px solid rgba(1
 .graph-filters button { border: 1px solid rgba(165, 180, 204, .2); border-radius: 999px; padding: 6px 9px; color: var(--kairos-text-secondary); background: rgba(3, 8, 20, .3); cursor: pointer; font-size: 10px; font-weight: 700; }
 .graph-filters button.is-active { border-color: rgba(118, 228, 255, .47); color: var(--kairos-active-cyan); background: rgba(118, 228, 255, .08); }
 .graph-drag-hint { margin-left: auto; color: #71819d; font-size: 9px; font-weight: 650; white-space: nowrap; }
+.graph-drag-hint.is-settling { color: var(--kairos-active-cyan); }
 .graph-reset-layout { padding: 8px 9px; color: var(--kairos-text-secondary); }
 .graph-reset-layout:disabled { cursor: default; opacity: .42; text-decoration: none; }
 .graph-search { width: min(100%, 206px); }
@@ -544,11 +545,11 @@ pre { max-height: 210px; overflow: auto; margin: 0; border-top: 1px solid rgba(1
 .graph-lines line.is-containment { stroke: rgba(149, 165, 191, .22); stroke-width: .2; }
 .graph-lines line.is-tag { stroke: rgba(149, 165, 191, .34); stroke-width: .28; stroke-dasharray: .7 1.2; }
 .graph-lines line.is-cross-brain { stroke: rgba(255, 199, 102, .9); stroke-width: .62; stroke-dasharray: 1.3 1; }
-.graph-node { --node-color: var(--kairos-generic); position: absolute; z-index: 1; display: grid; width: 10px; height: 10px; place-items: center; transform: translate(-50%, -50%); border: 1px solid color-mix(in srgb, var(--node-color) 58%, transparent); border-radius: 50%; padding: 0; background: color-mix(in srgb, var(--node-color) 74%, var(--kairos-surface)); box-shadow: 0 0 9px color-mix(in srgb, var(--node-color) 42%, transparent); cursor: grab; touch-action: none; }
+.graph-node { --node-color: var(--kairos-generic); --node-size: 10px; position: absolute; z-index: 1; display: grid; width: var(--node-size); height: var(--node-size); place-items: center; transform: translate(-50%, -50%); border: 1px solid color-mix(in srgb, var(--node-color) 58%, transparent); border-radius: 50%; padding: 0; background: color-mix(in srgb, var(--node-color) 74%, var(--kairos-surface)); box-shadow: 0 0 9px color-mix(in srgb, var(--node-color) 42%, transparent); cursor: grab; touch-action: none; will-change: left, top; }
 .graph-node:active { cursor: grabbing; }
 .graph-node:hover,
 .graph-node.is-selected { z-index: 3; border-color: var(--kairos-ivory); box-shadow: 0 0 0 3px color-mix(in srgb, var(--node-color) 25%, transparent), 0 0 13px color-mix(in srgb, var(--node-color) 62%, transparent); }
-.graph-node--brain { width: 13px; height: 13px; border-width: 2px; background: color-mix(in srgb, var(--node-color) 45%, var(--kairos-surface)); }
+.graph-node--brain { width: max(13px, var(--node-size)); height: max(13px, var(--node-size)); border-width: 2px; background: color-mix(in srgb, var(--node-color) 45%, var(--kairos-surface)); }
 .graph-node--kairos,
 .graph-node--manager { z-index: 2; width: 18px; height: 18px; border: 2px solid #ffe0a1; background: var(--kairos-kairos-gold); box-shadow: 0 0 17px rgba(255, 199, 102, .7); }
 .graph-node__dot { display: block; width: 100%; height: 100%; border-radius: inherit; background: var(--node-color); opacity: .42; }

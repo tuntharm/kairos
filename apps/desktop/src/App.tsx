@@ -9,6 +9,13 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import {
+  atlasNodeDiameter,
+  createAtlasPhysics,
+  meaningfulConnectionDegrees,
+  settleAtlasPhysics,
+  type AtlasPhysicsController,
+} from "./atlasPhysics";
 
 import brandMark from "../../../design/assets/brand/kairos-mark-gradient.svg";
 import brandWordmark from "../../../design/assets/brand/kairos-wordmark-dark.svg";
@@ -295,6 +302,7 @@ const graphCameraFit: GraphCamera = { scale: 1, x: 0, y: 0 };
 const graphZoomMin = 0.6;
 const graphZoomMax = 3;
 const graphManualLayoutStorageKey = "kairos.graph-manual-layout.v1";
+const maxLiveAtlasPhysicsNodes = 500;
 
 const browserPreviewStatus: AppStatus = {
   configPath: "Browser preview",
@@ -469,6 +477,10 @@ function labelForBrainId(brainId: string) {
 
 function hasNativeBridge() {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+function prefersReducedMotion() {
+  return typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
 function brainVisual(brainId: string): BrainVisual {
@@ -885,6 +897,8 @@ export default function App() {
   const [previousGraphCamera, setPreviousGraphCamera] = useState<GraphCamera | null>(null);
   const [graphViewportSize, setGraphViewportSize] = useState({ width: 1, height: 1 });
   const [manualGraphPositions, setManualGraphPositions] = useState<ManualGraphPositions>(readManualGraphPositions);
+  const [physicsGraphPositions, setPhysicsGraphPositions] = useState<ManualGraphPositions>({});
+  const [graphPhysicsActive, setGraphPhysicsActive] = useState(false);
   const graphCanvasRef = useRef<HTMLDivElement | null>(null);
   const graphDragRef = useRef<{ pointerId: number; startX: number; startY: number; camera: GraphCamera } | null>(null);
   const graphNodeDragRef = useRef<{
@@ -897,6 +911,11 @@ export default function App() {
     moved: boolean;
   } | null>(null);
   const suppressGraphNodeClickRef = useRef<string | null>(null);
+  const manualGraphPositionsRef = useRef(manualGraphPositions);
+  const atlasPhysicsRef = useRef<AtlasPhysicsController | null>(null);
+  const graphPhysicsFrameRef = useRef<number | null>(null);
+  const graphPhysicsLastRenderRef = useRef(0);
+  const graphPhysicsLiveRef = useRef(false);
   const [addBrain, setAddBrain] = useState<{
     selectionToken: string;
     displayPath?: string;
@@ -1152,17 +1171,83 @@ export default function App() {
     }
   };
 
+  const scheduleAtlasPhysicsRender = (controller: AtlasPhysicsController) => {
+    if (graphPhysicsFrameRef.current !== null) return;
+    const render = (timestamp: number) => {
+      const remaining = 33 - (timestamp - graphPhysicsLastRenderRef.current);
+      if (remaining > 0) {
+        graphPhysicsFrameRef.current = window.requestAnimationFrame(render);
+        return;
+      }
+      graphPhysicsFrameRef.current = null;
+      graphPhysicsLastRenderRef.current = timestamp;
+      if (atlasPhysicsRef.current !== controller) return;
+      setPhysicsGraphPositions(controller.positions());
+    };
+    graphPhysicsFrameRef.current = window.requestAnimationFrame(render);
+  };
+
   useEffect(() => {
     void refreshStatus();
   }, []);
 
   useEffect(() => {
+    manualGraphPositionsRef.current = manualGraphPositions;
     try {
       window.localStorage.setItem(graphManualLayoutStorageKey, JSON.stringify(manualGraphPositions));
     } catch {
       // Node arrangement remains usable for this session if local storage is unavailable.
     }
   }, [manualGraphPositions]);
+
+  useEffect(() => {
+    atlasPhysicsRef.current?.stop();
+    if (graphPhysicsFrameRef.current !== null) {
+      window.cancelAnimationFrame(graphPhysicsFrameRef.current);
+      graphPhysicsFrameRef.current = null;
+    }
+    const controller = createAtlasPhysics(graph.nodes, graph.edges, manualGraphPositionsRef.current);
+    atlasPhysicsRef.current = controller;
+    if (!controller) {
+      graphPhysicsLiveRef.current = false;
+      setGraphPhysicsActive(false);
+      setPhysicsGraphPositions({});
+      return;
+    }
+
+    setPhysicsGraphPositions(controller.positions());
+    const runLive = graph.nodes.length <= maxLiveAtlasPhysicsNodes && !prefersReducedMotion();
+    graphPhysicsLiveRef.current = runLive;
+    if (!runLive) {
+      setGraphPhysicsActive(false);
+      setPhysicsGraphPositions(settleAtlasPhysics(controller));
+      return () => {
+        controller.stop();
+        if (graphPhysicsFrameRef.current !== null) {
+          window.cancelAnimationFrame(graphPhysicsFrameRef.current);
+          graphPhysicsFrameRef.current = null;
+        }
+        if (atlasPhysicsRef.current === controller) atlasPhysicsRef.current = null;
+      };
+    }
+
+    setGraphPhysicsActive(true);
+    controller.simulation.on("tick", () => scheduleAtlasPhysicsRender(controller));
+    controller.simulation.on("end", () => {
+      scheduleAtlasPhysicsRender(controller);
+      if (atlasPhysicsRef.current === controller) setGraphPhysicsActive(false);
+    });
+    controller.settle();
+
+    return () => {
+      controller.stop();
+      if (graphPhysicsFrameRef.current !== null) {
+        window.cancelAnimationFrame(graphPhysicsFrameRef.current);
+        graphPhysicsFrameRef.current = null;
+      }
+      if (atlasPhysicsRef.current === controller) atlasPhysicsRef.current = null;
+    };
+  }, [graph]);
 
   useEffect(() => {
     const mode = localSetup?.memoryBudgetMode;
@@ -1983,11 +2068,15 @@ export default function App() {
       return matchesBrain && matchesSearch && !node.protected;
     })
     .map((node) => {
-      const manualPosition = manualGraphPositions[node.id];
-      return manualPosition && !isKairosGraphNode(node) ? { ...node, ...manualPosition } : node;
-    }), [graph, graphFilter, graphSearch, manualGraphPositions]);
+      const physicsPosition = physicsGraphPositions[node.id] ?? manualGraphPositions[node.id];
+      return physicsPosition && !isKairosGraphNode(node) ? { ...node, ...physicsPosition } : node;
+    }), [graph, graphFilter, graphSearch, manualGraphPositions, physicsGraphPositions]);
   const graphNodeIds = new Set(graphNodes.map((node) => node.id));
   const graphEdges = graph.edges.filter((edge) => graphNodeIds.has(edge.source) && graphNodeIds.has(edge.target));
+  const graphConnectionDegrees = useMemo(() => meaningfulConnectionDegrees(
+    graph.nodes.filter((node) => !node.protected && !isKairosGraphNode(node)),
+    graph.edges,
+  ), [graph]);
   const graphNodeById = useMemo(() => new Map(graphNodes.map((node) => [node.id, node])), [graphNodes]);
   const graphWorldNodes = useMemo(() => graphNodes.filter((node) => !isKairosGraphNode(node)), [graphNodes]);
   const graphWorldEdges = useMemo(() => graphEdges.filter((edge) => edge.source !== "kairos" && edge.target !== "kairos"), [graphEdges]);
@@ -2093,14 +2182,22 @@ export default function App() {
     if (nodeDrag?.pointerId === event.pointerId) {
       const deltaX = event.clientX - nodeDrag.startClientX;
       const deltaY = event.clientY - nodeDrag.startClientY;
-      if (Math.hypot(deltaX, deltaY) > 3) nodeDrag.moved = true;
-      setManualGraphPositions((current) => ({
-        ...current,
-        [nodeDrag.nodeId]: {
-          x: clampGraphCoordinate(nodeDrag.startPosition.x + (deltaX / (graphViewportSize.width * nodeDrag.scale)) * 100),
-          y: clampGraphCoordinate(nodeDrag.startPosition.y + (deltaY / (graphViewportSize.height * nodeDrag.scale)) * 100),
-        },
-      }));
+      const position = {
+        x: clampGraphCoordinate(nodeDrag.startPosition.x + (deltaX / (graphViewportSize.width * nodeDrag.scale)) * 100),
+        y: clampGraphCoordinate(nodeDrag.startPosition.y + (deltaY / (graphViewportSize.height * nodeDrag.scale)) * 100),
+      };
+      if (!nodeDrag.moved && Math.hypot(deltaX, deltaY) > 3) {
+        nodeDrag.moved = true;
+        atlasPhysicsRef.current?.pin(nodeDrag.nodeId, nodeDrag.startPosition);
+        if (graphPhysicsLiveRef.current) {
+          atlasPhysicsRef.current?.reheat();
+          setGraphPhysicsActive(true);
+        }
+      }
+      if (nodeDrag.moved) {
+        atlasPhysicsRef.current?.movePinnedNode(nodeDrag.nodeId, position);
+        setPhysicsGraphPositions((current) => ({ ...current, [nodeDrag.nodeId]: position }));
+      }
       return;
     }
     const drag = graphDragRef.current;
@@ -2115,6 +2212,20 @@ export default function App() {
     const nodeDrag = graphNodeDragRef.current;
     if (nodeDrag?.pointerId === event.pointerId) {
       if (nodeDrag.moved) {
+        const finalPosition = atlasPhysicsRef.current?.positions()[nodeDrag.nodeId]
+          ?? physicsGraphPositions[nodeDrag.nodeId]
+          ?? nodeDrag.startPosition;
+        const nextPinnedPositions = { ...manualGraphPositionsRef.current, [nodeDrag.nodeId]: finalPosition };
+        manualGraphPositionsRef.current = nextPinnedPositions;
+        setManualGraphPositions(nextPinnedPositions);
+        if (atlasPhysicsRef.current) {
+          if (graphPhysicsLiveRef.current) {
+            atlasPhysicsRef.current.settle();
+            setGraphPhysicsActive(true);
+          } else {
+            setPhysicsGraphPositions(settleAtlasPhysics(atlasPhysicsRef.current));
+          }
+        }
         suppressGraphNodeClickRef.current = nodeDrag.nodeId;
         window.setTimeout(() => {
           if (suppressGraphNodeClickRef.current === nodeDrag.nodeId) suppressGraphNodeClickRef.current = null;
@@ -2127,6 +2238,17 @@ export default function App() {
     if (graphDragRef.current?.pointerId !== event.pointerId) return;
     graphDragRef.current = null;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+  const resetGraphPositions = () => {
+    manualGraphPositionsRef.current = {};
+    setManualGraphPositions({});
+    setPhysicsGraphPositions({});
+    setSelectedGraphNode(null);
+    setPreviousGraphCamera(null);
+    setGraph((current) => ({
+      ...current,
+      nodes: layoutGraph(current.nodes.map((node) => ({ ...node, x: undefined, y: undefined })), current.edges),
+    }));
   };
   const centreGraphFromMinimap = (clientX: number, clientY: number, element: SVGSVGElement) => {
     const bounds = element.getBoundingClientRect();
@@ -2582,7 +2704,7 @@ export default function App() {
                 <p>Explicit Markdown links, tags, and registered bridges only. Protected notes never appear here.</p>
               </div>
               <div className="surface-heading__actions">
-                <button className="text-action graph-reset-layout" type="button" onClick={() => setManualGraphPositions({})} disabled={Object.keys(manualGraphPositions).length === 0}>Reset positions</button>
+                <button className="text-action graph-reset-layout" type="button" onClick={resetGraphPositions} disabled={Object.keys(manualGraphPositions).length === 0}>Reset positions</button>
                 <button className="secondary-action" onClick={() => void refreshGraph()} disabled={graphBusy}>{graphBusy ? "Refreshing…" : "Refresh metadata"}</button>
               </div>
             </div>
@@ -2594,7 +2716,7 @@ export default function App() {
                   <button key={brain.id} className={graphFilter === brain.id ? "is-active" : ""} onClick={() => setGraphFilter(brain.id)}>{brain.name.replace(" Brain", "")}</button>
                 ))}
               </div>
-              <span className="graph-drag-hint">Drag nodes · saved locally</span>
+              <span className={`graph-drag-hint ${graphPhysicsActive ? "is-settling" : ""}`}>{graphPhysicsActive ? "Settling atlas…" : "Node size = meaningful links · drag to arrange"}</span>
               <label className="graph-search"><span className="sr-only">Search graph</span><input value={graphSearch} onChange={(event) => setGraphSearch(event.target.value)} placeholder="Find a note or map" /></label>
             </div>
             <div className="graph-legend" aria-label="Brain colours and link types">
@@ -2638,20 +2760,22 @@ export default function App() {
                   </svg>
                 {graphWorldNodes.map((node) => {
                   const visual = brainVisual(node.brainId);
+                  const connectionDegree = graphConnectionDegrees.get(node.id) ?? 0;
+                  const nodeDiameter = atlasNodeDiameter(node, connectionDegree);
                   const showLabel = selectedGraphNode === node.id || hoveredGraphNode === node.id || (Boolean(graphSearch.trim()) && graphWorldNodes.length <= 8);
                   const labelLeft = (node.x ?? 50) > 65;
                   return (
                     <button
                       key={node.id}
                       className={`graph-node graph-node--${node.kind ?? "note"} ${selectedGraphNode === node.id ? "is-selected" : ""} ${showLabel ? "shows-label" : ""} ${labelLeft ? "label-left" : ""}`}
-                      style={{ "--node-color": visual.color, left: `${node.x ?? 50}%`, top: `${node.y ?? 50}%` } as CSSProperties}
+                      style={{ "--node-color": visual.color, "--node-size": `${nodeDiameter}px`, left: `${node.x ?? 50}%`, top: `${node.y ?? 50}%` } as CSSProperties}
                       onPointerDown={(event) => handleGraphNodePointerDown(event, node)}
                       onClick={() => handleGraphNodeClick(node)}
                       onMouseEnter={() => setHoveredGraphNode(node.id)}
                       onMouseLeave={() => setHoveredGraphNode((current) => current === node.id ? null : current)}
                       onFocus={() => setHoveredGraphNode(node.id)}
                       onBlur={() => setHoveredGraphNode((current) => current === node.id ? null : current)}
-                      title={`Drag to arrange · ${node.label} · ${visual.label}`}
+                      title={`Drag to arrange · ${node.label} · ${connectionDegree} meaningful connection${connectionDegree === 1 ? "" : "s"} · ${visual.label}`}
                     >
                       <span className="graph-node__dot" />
                       {showLabel && <span className="graph-node__label">{node.label}</span>}
@@ -2690,7 +2814,7 @@ export default function App() {
                     const target = graphNodeById.get(edge.target);
                     return source && target ? <line key={`mini-${edge.id ?? `${edge.source}-${edge.target}`}`} x1={source.x} y1={source.y} x2={target.x} y2={target.y} /> : null;
                   })}
-                  {graphWorldNodes.map((node) => <circle key={`mini-${node.id}`} cx={node.x} cy={node.y} r={node.kind === "brain" ? 1.7 : 1} fill={brainVisual(node.brainId).color} />)}
+                  {graphWorldNodes.map((node) => <circle key={`mini-${node.id}`} cx={node.x} cy={node.y} r={Math.max(node.kind === "brain" ? 1.5 : 1, atlasNodeDiameter(node, graphConnectionDegrees.get(node.id) ?? 0) / 10)} fill={brainVisual(node.brainId).color} />)}
                   <rect className="graph-minimap__viewport" x={minimapViewport.x} y={minimapViewport.y} width={minimapViewport.width} height={minimapViewport.height} />
                 </svg>
                 {graphWorldNodes.length === 0 && <div className="graph-empty">No matching public graph metadata.</div>}
