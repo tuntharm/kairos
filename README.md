@@ -32,8 +32,11 @@ provenance, and local application settings—not your knowledge base.
 
 ## What it does
 
-- **Summon chat with `⌥ Space`.** Open a compact chat, then expand into Chat,
-  What Next, Brain Map, and Settings.
+- **Summon chat with `⌥ Space`.** Open a focused compact chat, then expand the
+  same conversation into the unified chat–Kairos–brain cockpit. What Next,
+  history, brain access, and Settings open as focused cockpit panels.
+- **Navigate the atlas directly.** Pan, zoom, use the minimap, focus a node,
+  inspect safe metadata, and reveal file-backed nodes in Finder.
 - **Route before reading.** Questions are routed to registered brains; unclear
   requests ask for a choice rather than broadcasting across every folder.
 - **Keep context bounded and cited.** Kairos retrieves approved, relevant note

@@ -931,11 +931,21 @@ fn set_surface_mode(app: AppHandle, expanded: bool) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| "Kairos main window is unavailable.".to_owned())?;
-    let (width, height, min_width, min_height) = if expanded {
-        (1_100.0, 820.0, 720.0, 600.0)
+    let (mut width, mut height, mut min_width, mut min_height): (f64, f64, f64, f64) = if expanded {
+        (1_280.0, 820.0, 920.0, 640.0)
     } else {
         (680.0, 720.0, 480.0, 540.0)
     };
+    if let Ok(Some(monitor)) = window.current_monitor() {
+        let scale = monitor.scale_factor();
+        let monitor_size = monitor.size();
+        let available_width = (f64::from(monitor_size.width) / scale) * 0.92;
+        let available_height = (f64::from(monitor_size.height) / scale) * 0.90;
+        width = width.min(available_width);
+        height = height.min(available_height);
+        min_width = min_width.min(width);
+        min_height = min_height.min(height);
+    }
     window
         .set_min_size(Some(tauri::LogicalSize::new(min_width, min_height)))
         .map_err(|error| format!("could not resize Kairos: {error}"))?;
@@ -2504,6 +2514,10 @@ fn configured_shortcut() -> Shortcut {
         .unwrap_or_else(|_| Shortcut::from_str("Alt+Space").expect("static shortcut"))
 }
 
+fn shortcut_summon_target() -> SummonTarget {
+    SummonTarget::CompactChat
+}
+
 fn toggle_window(app: &AppHandle) -> tauri::Result<()> {
     let Some(window) = app.get_webview_window("main") else {
         return Ok(());
@@ -2513,13 +2527,10 @@ fn toggle_window(app: &AppHandle) -> tauri::Result<()> {
     } else {
         window.show()?;
         window.set_focus()?;
-        let target = config_path()
-            .ok()
-            .filter(|path| path.exists())
-            .and_then(|path| load_app_config(&path).ok())
-            .map(|config| config.app.summon_target)
-            .unwrap_or(SummonTarget::CompactChat);
-        let _ = app.emit("kairos://summon", target);
+        // The global summon is deliberately predictable: it always returns to
+        // the focused compact chat. Full cockpit mode is an explicit in-app
+        // expansion and never leaks across summon cycles.
+        let _ = app.emit("kairos://summon", shortcut_summon_target());
     }
     Ok(())
 }
@@ -2692,5 +2703,10 @@ mod tests {
         assert_eq!(plan.effective_profile, HardwareProfile::NvidiaVram);
         assert_eq!(plan.primary_fit_limit_gb, Some(24));
         assert!(plan.planning_override);
+    }
+
+    #[test]
+    fn global_shortcut_always_returns_to_compact_chat() {
+        assert_eq!(shortcut_summon_target(), SummonTarget::CompactChat);
     }
 }

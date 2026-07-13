@@ -1,7 +1,10 @@
 import {
   type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+  type WheelEvent as ReactWheelEvent,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -274,14 +277,21 @@ type StoredChatSession = ChatSessionSummary & {
 
 type ProviderId = "ollama" | "openai" | "anthropic" | "codex-cli" | "claude-cli";
 type ViewId = "chat" | "next" | "map" | "settings";
+type NavId = ViewId | "history" | "brains" | "privacy";
+type SurfaceMode = "compact" | "cockpit";
+type SettingsAnchor = "top" | "brains" | "privacy" | "writes";
 type MemoryBudget = "auto" | "custom" | 16 | 24 | 32 | 48 | 64 | 96 | 192;
 type KairosConsentMode = "ask" | "approve_local" | "full_kairos";
 type ScopedExecutionGrant = { token: string; brainId: string; providerId: ProviderId; sessionId: string; expiresAt: string };
+type GraphCamera = { scale: number; x: number; y: number };
 
 type BrainVisual = { label: string; color: string; icon: string };
 
 const briefQuestion = "What should I do next, and why?";
 const ollamaInstallUrl = "https://ollama.com/download/mac";
+const graphCameraFit: GraphCamera = { scale: 1, x: 0, y: 0 };
+const graphZoomMin = 0.6;
+const graphZoomMax = 3;
 
 const browserPreviewStatus: AppStatus = {
   configPath: "Browser preview",
@@ -804,7 +814,9 @@ export default function App() {
   const [status, setStatus] = useState<AppStatus | null>(() => nativeRuntime ? null : browserPreviewStatus);
   const [localSetup, setLocalSetup] = useState<LocalSetupStatus | null>(() => nativeRuntime ? null : browserPreviewSetup);
   const [view, setView] = useState<ViewId>("chat");
-  const [expanded, setExpanded] = useState(false);
+  const [settingsAnchor, setSettingsAnchor] = useState<SettingsAnchor>("top");
+  const [surfaceMode, setSurfaceMode] = useState<SurfaceMode>("compact");
+  const expanded = surfaceMode === "cockpit";
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [capabilityNotice, setCapabilityNotice] = useState<string | null>(null);
@@ -812,6 +824,7 @@ export default function App() {
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(defaultChatMessages);
   const [streamingAssistant, setStreamingAssistant] = useState<StreamingAssistant | null>(null);
   const [composer, setComposer] = useState("");
+  const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
   const [providerId, setProviderId] = useState<ProviderId>("ollama");
@@ -822,6 +835,7 @@ export default function App() {
   const [chatSessionId, setChatSessionId] = useState<string | null>(null);
   const [chatSessions, setChatSessions] = useState<ChatSessionSummary[]>([]);
   const [chatSearch, setChatSearch] = useState("");
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [providerModel, setProviderModel] = useState("");
   const [providerApiKey, setProviderApiKey] = useState("");
   const [providerSettingsBusy, setProviderSettingsBusy] = useState(false);
@@ -846,6 +860,11 @@ export default function App() {
   const [graphSearch, setGraphSearch] = useState("");
   const [selectedGraphNode, setSelectedGraphNode] = useState<string | null>(null);
   const [hoveredGraphNode, setHoveredGraphNode] = useState<string | null>(null);
+  const [graphCamera, setGraphCamera] = useState<GraphCamera>(graphCameraFit);
+  const [previousGraphCamera, setPreviousGraphCamera] = useState<GraphCamera | null>(null);
+  const [graphViewportSize, setGraphViewportSize] = useState({ width: 1, height: 1 });
+  const graphCanvasRef = useRef<HTMLDivElement | null>(null);
+  const graphDragRef = useRef<{ pointerId: number; startX: number; startY: number; camera: GraphCamera } | null>(null);
   const [addBrain, setAddBrain] = useState<{
     selectionToken: string;
     displayPath?: string;
@@ -1047,7 +1066,7 @@ export default function App() {
         setPreferences((current) => ({
           ...current,
           shortcut: nextStatus.app?.summonShortcut?.replace("Alt", "Option") ?? current.shortcut,
-          summonTarget: nextStatus.app?.summonTarget === "last_surface" ? "last-page" : "compact",
+          summonTarget: "compact",
           launchAtLogin: nextStatus.app?.launchAtLogin ?? current.launchAtLogin,
           closeToHide: nextStatus.app?.closeToHide ?? current.closeToHide,
           keepAboveOtherWindows: nextStatus.app?.keepAboveOtherWindows ?? current.keepAboveOtherWindows,
@@ -1133,13 +1152,9 @@ export default function App() {
   useEffect(() => {
     if (!nativeRuntime) return;
     let dispose: (() => void) | undefined;
-    void listen<"compact_chat" | "last_surface">("kairos://summon", (event) => {
-      if (event.payload === "last_surface") {
-        setExpanded(true);
-      } else {
-        setView("chat");
-        setExpanded(false);
-      }
+    void listen<"compact_chat" | "last_surface">("kairos://summon", () => {
+      setView("chat");
+      setSurfaceMode("compact");
     }).then((unlisten) => {
       dispose = unlisten;
     });
@@ -1204,6 +1219,49 @@ export default function App() {
     });
   }, [expanded, nativeRuntime]);
 
+  useEffect(() => {
+    const animationFrame = window.requestAnimationFrame(() => composerRef.current?.focus());
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [surfaceMode]);
+
+  useEffect(() => {
+    if (!expanded || !graphCanvasRef.current) return;
+    const canvas = graphCanvasRef.current;
+    const updateSize = () => {
+      const bounds = canvas.getBoundingClientRect();
+      setGraphViewportSize({
+        width: Math.max(1, bounds.width),
+        height: Math.max(1, bounds.height),
+      });
+    };
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, [expanded]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || !expanded) return;
+      if (selectedGraphNode) {
+        setSelectedGraphNode(null);
+        if (previousGraphCamera) {
+          setGraphCamera(previousGraphCamera);
+          setPreviousGraphCamera(null);
+        }
+        return;
+      }
+      if (view !== "chat" && view !== "map") {
+        setView("chat");
+        return;
+      }
+      setView("chat");
+      setSurfaceMode("compact");
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [expanded, previousGraphCamera, selectedGraphNode, view]);
+
   const refreshChatSessions = async (query = chatSearch) => {
     if (!nativeRuntime) return;
     try {
@@ -1215,6 +1273,7 @@ export default function App() {
   };
 
   const startNewChat = async () => {
+    setHistoryOpen(false);
     if (!nativeRuntime) {
       setChatSessionId(null);
       setChatMessages(defaultChatMessages());
@@ -1235,6 +1294,7 @@ export default function App() {
     try {
       const session = await invoke<StoredChatSession>("load_chat_session", { sessionId });
       setChatSessionId(session.id);
+      setHistoryOpen(false);
       setChatMessages(session.messages.length ? session.messages.map((message) => ({
         id: message.id,
         role: message.role,
@@ -1286,7 +1346,8 @@ export default function App() {
       relativePath: `01_Daily/${day} Kairos Chat.md`,
       markdown: `---\ntype: kairos_chat\ncreated: ${new Date().toISOString()}\n---\n\n# Kairos chat\n\n${transcript}\n`,
     });
-    setExpanded(true);
+    setSurfaceMode("cockpit");
+    setSettingsAnchor("writes");
     setView("settings");
   };
 
@@ -1298,6 +1359,26 @@ export default function App() {
     if (view === "map") void refreshGraph();
     if (view === "settings") void refreshBrains();
   }, [view]);
+
+  useEffect(() => {
+    if (view !== "settings" || settingsAnchor === "top") return;
+    const targetId = settingsAnchor === "brains"
+      ? "brain-registry-settings"
+      : settingsAnchor === "privacy"
+        ? "provider-access-settings"
+        : "confirmed-write-settings";
+    const animationFrame = window.requestAnimationFrame(() => {
+      document.getElementById(targetId)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
+    return () => window.cancelAnimationFrame(animationFrame);
+  }, [settingsAnchor, view]);
+
+  useEffect(() => {
+    if (expanded) {
+      void refreshGraph();
+      void refreshBrains();
+    }
+  }, [expanded]);
 
   const selectModel = async (model: string) => {
     if (!nativeRuntime) {
@@ -1320,7 +1401,7 @@ export default function App() {
   const runPulse = async () => {
     if (activeProvider.external) {
       setView("chat");
-      setExpanded(true);
+      setSurfaceMode("cockpit");
       setComposer(briefQuestion);
       await previewExternalTurn(briefQuestion);
       return;
@@ -1784,7 +1865,7 @@ export default function App() {
       "save_app_preferences",
       {
         shortcut: preferences.shortcut,
-        summonTarget: preferences.summonTarget,
+        summonTarget: "compact",
         launchAtLogin: preferences.launchAtLogin,
         closeToHide: preferences.closeToHide,
         keepAboveOtherWindows: preferences.keepAboveOtherWindows,
@@ -1857,21 +1938,134 @@ export default function App() {
   const graphNodes = useMemo(() => graph.nodes.filter((node) => {
     const matchesBrain = graphFilter === "all" || node.brainId === graphFilter || node.id === "kairos";
     const needle = graphSearch.trim().toLowerCase();
-    const matchesSearch = !needle || node.label.toLowerCase().includes(needle);
+    const matchesSearch = isKairosGraphNode(node) || !needle || node.label.toLowerCase().includes(needle);
     return matchesBrain && matchesSearch && !node.protected;
   }), [graph, graphFilter, graphSearch]);
   const graphNodeIds = new Set(graphNodes.map((node) => node.id));
   const graphEdges = graph.edges.filter((edge) => graphNodeIds.has(edge.source) && graphNodeIds.has(edge.target));
   const graphNodeById = useMemo(() => new Map(graphNodes.map((node) => [node.id, node])), [graphNodes]);
+  const graphWorldNodes = useMemo(() => graphNodes.filter((node) => !isKairosGraphNode(node)), [graphNodes]);
+  const graphWorldEdges = useMemo(() => graphEdges.filter((edge) => edge.source !== "kairos" && edge.target !== "kairos"), [graphEdges]);
+  const graphAnchorEdges = useMemo(() => graphEdges.flatMap((edge) => {
+    if (edge.source !== "kairos" && edge.target !== "kairos") return [];
+    const node = graphNodeById.get(edge.source === "kairos" ? edge.target : edge.source);
+    return node && !isKairosGraphNode(node) ? [{ edge, node }] : [];
+  }), [graphEdges, graphNodeById]);
+  const latestRoutes = useMemo(() => [...chatMessages]
+    .reverse()
+    .find((message) => message.role === "assistant" && message.routes?.length)?.routes ?? [], [chatMessages]);
+  const latestRouteIds = useMemo(() => new Set(latestRoutes.map((route) => route.id)), [latestRoutes]);
   const graphLegend = useMemo(() => Array.from(new Set(graph.nodes
     .map((node) => node.brainId)
     .filter((brainId) => brainId && brainId !== "kairos")))
     .sort((left, right) => left.localeCompare(right))
     .map((brainId) => ({ id: brainId, ...brainVisual(brainId) })), [graph]);
 
+  const clampGraphScale = (scale: number) => Math.max(graphZoomMin, Math.min(graphZoomMax, scale));
+  const zoomGraphAt = (nextScale: number, focusX: number, focusY: number) => {
+    setGraphCamera((current) => {
+      const scale = clampGraphScale(nextScale);
+      const worldX = (focusX - current.x) / current.scale;
+      const worldY = (focusY - current.y) / current.scale;
+      return {
+        scale,
+        x: focusX - worldX * scale,
+        y: focusY - worldY * scale,
+      };
+    });
+  };
+  const zoomGraphBy = (amount: number) => {
+    zoomGraphAt(
+      graphCamera.scale + amount,
+      graphViewportSize.width / 2,
+      graphViewportSize.height / 2,
+    );
+  };
+  const fitGraph = () => {
+    setPreviousGraphCamera(null);
+    setSelectedGraphNode(null);
+    setGraphCamera(graphCameraFit);
+  };
+  const focusGraphNode = (node: GraphNode) => {
+    if (isKairosGraphNode(node)) {
+      fitGraph();
+      return;
+    }
+    const scale = Math.max(1.8, graphCamera.scale);
+    setPreviousGraphCamera(graphCamera);
+    setSelectedGraphNode(node.id);
+    setGraphCamera({
+      scale,
+      x: graphViewportSize.width * 0.5 - ((node.x ?? 50) / 100) * graphViewportSize.width * scale,
+      y: graphViewportSize.height * 0.5 - ((node.y ?? 50) / 100) * graphViewportSize.height * scale,
+    });
+  };
+  const restoreGraphCamera = () => {
+    setSelectedGraphNode(null);
+    if (previousGraphCamera) setGraphCamera(previousGraphCamera);
+    setPreviousGraphCamera(null);
+  };
+  const handleGraphWheel = (event: ReactWheelEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const delta = event.deltaY > 0 ? -0.16 : 0.16;
+    zoomGraphAt(graphCamera.scale + delta, event.clientX - bounds.left, event.clientY - bounds.top);
+  };
+  const handleGraphPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if ((event.target as HTMLElement).closest("button, input, .graph-inspector, .graph-minimap")) return;
+    graphDragRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      camera: graphCamera,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const handleGraphPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = graphDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    setGraphCamera({
+      ...drag.camera,
+      x: drag.camera.x + event.clientX - drag.startX,
+      y: drag.camera.y + event.clientY - drag.startY,
+    });
+  };
+  const finishGraphPointer = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (graphDragRef.current?.pointerId !== event.pointerId) return;
+    graphDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  };
+  const centreGraphFromMinimap = (clientX: number, clientY: number, element: SVGSVGElement) => {
+    const bounds = element.getBoundingClientRect();
+    const x = Math.max(0, Math.min(1, (clientX - bounds.left) / bounds.width));
+    const y = Math.max(0, Math.min(1, (clientY - bounds.top) / bounds.height));
+    setGraphCamera((current) => ({
+      ...current,
+      x: graphViewportSize.width / 2 - x * graphViewportSize.width * current.scale,
+      y: graphViewportSize.height / 2 - y * graphViewportSize.height * current.scale,
+    }));
+  };
+  const minimapViewportWidth = Math.min(100, 100 / graphCamera.scale);
+  const minimapViewportHeight = Math.min(100, 100 / graphCamera.scale);
+  const minimapViewport = {
+    x: Math.max(0, Math.min(100 - minimapViewportWidth, (-graphCamera.x / graphCamera.scale / graphViewportSize.width) * 100)),
+    y: Math.max(0, Math.min(100 - minimapViewportHeight, (-graphCamera.y / graphCamera.scale / graphViewportSize.height) * 100)),
+    width: minimapViewportWidth,
+    height: minimapViewportHeight,
+  };
+
+  useEffect(() => {
+    if (selectedGraphNode && !graphNodeIds.has(selectedGraphNode)) {
+      setSelectedGraphNode(null);
+      setPreviousGraphCamera(null);
+      setGraphCamera(graphCameraFit);
+    }
+  }, [graphNodes, selectedGraphNode]);
+
   const showView = (nextView: ViewId) => {
+    if (nextView === "settings") setSettingsAnchor("top");
     setView(nextView);
-    setExpanded(true);
+    setSurfaceMode("cockpit");
     setCapabilityNotice(null);
   };
 
@@ -1926,7 +2120,7 @@ export default function App() {
   };
 
   return (
-    <main className={`app-shell ${expanded ? "is-expanded" : "is-compact"}`}>
+    <main className={`app-shell ${expanded ? "is-expanded" : "is-compact"} view-${view}`}>
       <section className="control-plane">
         <header className="app-header">
           <div className="brand-lockup">
@@ -1938,7 +2132,15 @@ export default function App() {
               <span>SUMMON</span>
               <kbd>⌥ Space</kbd>
             </div>
-            <button className="icon-button expand-button" onClick={() => setExpanded((open) => !open)} aria-label={expanded ? "Use compact chat" : "Expand Kairos"}>
+            <button className="icon-button expand-button" onClick={() => {
+              if (expanded) {
+                setView("chat");
+                setSurfaceMode("compact");
+              } else {
+                setView("chat");
+                setSurfaceMode("cockpit");
+              }
+            }} aria-label={expanded ? "Use compact chat" : "Expand Kairos"}>
               {expanded ? "⌃" : "⌄"}
             </button>
           </div>
@@ -1947,18 +2149,45 @@ export default function App() {
         {expanded && (
           <nav className="primary-nav" aria-label="Kairos sections">
             {([
-              ["chat", "Chat"],
-              ["next", "What Next"],
-              ["map", "Brain Map"],
-              ["settings", "Settings"],
-            ] as Array<[ViewId, string]>).map(([id, label]) => (
+              ["chat", "Cockpit", "⌁"],
+              ["history", "Chat history", "◌"],
+              ["next", "What Next", "✦"],
+              ["map", "Brain Map", "⌘"],
+              ["brains", "Connected brains", "▱"],
+              ["privacy", "Privacy and providers", "◇"],
+              ["settings", "Settings", "⚙"],
+            ] as Array<[NavId, string, string]>).map(([id, label, icon]) => (
               <button
                 key={id}
-                className={`nav-button ${view === id ? "is-active" : ""}`}
-                onClick={() => showView(id)}
-                aria-current={view === id ? "page" : undefined}
+                className={`nav-button ${(
+                  id === "history"
+                    ? historyOpen
+                    : id === "brains" || id === "privacy"
+                      ? view === "settings" && settingsAnchor === id
+                      : id === "settings"
+                        ? view === "settings" && settingsAnchor === "top"
+                        : view === id
+                ) ? "is-active" : ""}`}
+                onClick={() => {
+                  if (id === "history") {
+                    setView("chat");
+                    setHistoryOpen((open) => !open);
+                  } else if (id === "brains" || id === "privacy") {
+                    setHistoryOpen(false);
+                    setSettingsAnchor(id);
+                    setView("settings");
+                    setSurfaceMode("cockpit");
+                  } else {
+                    setHistoryOpen(false);
+                    showView(id);
+                  }
+                }}
+                aria-current={id !== "history" && view === id ? "page" : undefined}
+                aria-label={label}
+                title={label}
               >
-                {label}
+                <span className="nav-button__icon" aria-hidden="true">{icon}</span>
+                <span className="nav-button__label">{label}</span>
               </button>
             ))}
           </nav>
@@ -1979,7 +2208,7 @@ export default function App() {
 
         {error && <p className="error-state" role="alert">{error}</p>}
 
-        {view === "chat" && (
+        {(view === "chat" || expanded) && (
           <section className="chat-surface" aria-label="Kairos chat">
             <div className="chat-heading">
               <div>
@@ -2001,11 +2230,11 @@ export default function App() {
             <div className="chat-session-bar">
               <button className="secondary-action" type="button" onClick={() => void startNewChat()} disabled={busy}>New chat</button>
               {chatMessages.some((message) => !message.notice) && <button className="text-action" type="button" onClick={prepareChatLog} disabled={busy}>Save chat to brain</button>}
-              {expanded && <label className="graph-search"><span className="sr-only">Search chat history</span><input value={chatSearch} onChange={(event) => { setChatSearch(event.target.value); void refreshChatSessions(event.target.value); }} placeholder="Search local chats" /></label>}
+              {expanded && historyOpen && <label className="graph-search"><span className="sr-only">Search chat history</span><input value={chatSearch} onChange={(event) => { setChatSearch(event.target.value); void refreshChatSessions(event.target.value); }} placeholder="Search local chats" /></label>}
               {expanded && chatSessionId && <button className="text-action" type="button" onClick={() => void deleteChatSession(chatSessionId)} disabled={busy}>Delete chat</button>}
             </div>
 
-            {expanded && chatSessions.length > 0 && (
+            {expanded && historyOpen && chatSessions.length > 0 && (
               <aside className="chat-history" aria-label="Local chat history">
                 {chatSessions.map((session) => <div key={session.id} className={`chat-history__item ${session.id === chatSessionId ? "is-active" : ""}`}><button type="button" onClick={() => void loadChatSession(session.id)}><strong>{session.title}</strong><small>{session.messageCount} messages · {shortDate(session.updatedAt)}</small></button>{session.id !== chatSessionId && <button type="button" className="text-action" onClick={() => void deleteChatSession(session.id)} aria-label={`Delete ${session.title}`}>×</button>}</div>)}
               </aside>
@@ -2107,6 +2336,7 @@ export default function App() {
                 </div>
               )}
               <textarea
+                ref={composerRef}
                 value={composer}
                 onChange={(event) => {
                   setComposer(event.target.value);
@@ -2200,6 +2430,7 @@ export default function App() {
                 <button className="primary-action" onClick={() => void runPulse()} disabled={busy || (!activeProvider.external && !modelReady)}>
                   {busy ? "Composing…" : activeProvider.external ? "Review cloud pulse" : "Compose pulse"}
                 </button>
+                <button className="icon-button" type="button" onClick={() => setView("chat")} aria-label="Back to cockpit">×</button>
               </div>
             </div>
 
@@ -2266,8 +2497,8 @@ export default function App() {
           </section>
         )}
 
-        {expanded && view === "map" && (
-          <section className="map-surface">
+        {expanded && (
+          <section className="map-surface cockpit-map">
             <div className="surface-heading">
               <div>
                 <p className="section-label">Whole-brain atlas</p>
@@ -2292,9 +2523,30 @@ export default function App() {
             </div>
 
             <div className="graph-layout">
-              <div className="graph-canvas" aria-label="Kairos whole brain graph">
-                <svg className="graph-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-                  {graphEdges.map((edge) => {
+              <div
+                className={`graph-canvas ${graphDragRef.current ? "is-panning" : ""}`}
+                aria-label="Kairos whole brain graph"
+                ref={graphCanvasRef}
+                onWheel={handleGraphWheel}
+                onPointerDown={handleGraphPointerDown}
+                onPointerMove={handleGraphPointerMove}
+                onPointerUp={finishGraphPointer}
+                onPointerCancel={finishGraphPointer}
+              >
+                <svg className="graph-anchor-lines" aria-hidden="true">
+                  {graphAnchorEdges.map(({ edge, node }) => {
+                    const targetX = graphCamera.x + ((node.x ?? 50) / 100) * graphViewportSize.width * graphCamera.scale;
+                    const targetY = graphCamera.y + ((node.y ?? 50) / 100) * graphViewportSize.height * graphCamera.scale;
+                    const active = latestRouteIds.has(node.brainId);
+                    return <line key={edge.id ?? `kairos-${node.id}`} className={active ? "is-active-route" : ""} x1="0" y1={graphViewportSize.height / 2} x2={targetX} y2={targetY} />;
+                  })}
+                </svg>
+                <div
+                  className="graph-world"
+                  style={{ transform: `translate3d(${graphCamera.x}px, ${graphCamera.y}px, 0) scale(${graphCamera.scale})` }}
+                >
+                  <svg className="graph-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+                  {graphWorldEdges.map((edge) => {
                     const source = graphNodeById.get(edge.source);
                     const target = graphNodeById.get(edge.target);
                     if (!source || !target) return null;
@@ -2303,17 +2555,17 @@ export default function App() {
                     const crossBrain = explicitLink && source.brainId !== target.brainId && source.brainId !== "kairos" && target.brainId !== "kairos";
                     return <line key={edge.id ?? `${edge.source}-${edge.target}-${edge.kind ?? ""}`} className={`${kind === "contains" ? "is-containment" : ""} ${kind === "tag" ? "is-tag" : ""} ${crossBrain ? "is-cross-brain" : ""}`} x1={source.x} y1={source.y} x2={target.x} y2={target.y} />;
                   })}
-                </svg>
-                {graphNodes.map((node) => {
+                  </svg>
+                {graphWorldNodes.map((node) => {
                   const visual = brainVisual(node.brainId);
-                  const showLabel = selectedGraphNode === node.id || hoveredGraphNode === node.id || (Boolean(graphSearch.trim()) && graphNodes.length <= 8);
+                  const showLabel = selectedGraphNode === node.id || hoveredGraphNode === node.id || (Boolean(graphSearch.trim()) && graphWorldNodes.length <= 8);
                   const labelLeft = (node.x ?? 50) > 65;
                   return (
                     <button
                       key={node.id}
                       className={`graph-node graph-node--${node.kind ?? "note"} ${selectedGraphNode === node.id ? "is-selected" : ""} ${showLabel ? "shows-label" : ""} ${labelLeft ? "label-left" : ""}`}
                       style={{ "--node-color": visual.color, left: `${node.x ?? 50}%`, top: `${node.y ?? 50}%` } as CSSProperties}
-                      onClick={() => setSelectedGraphNode(node.id)}
+                      onClick={() => focusGraphNode(node)}
                       onMouseEnter={() => setHoveredGraphNode(node.id)}
                       onMouseLeave={() => setHoveredGraphNode((current) => current === node.id ? null : current)}
                       onFocus={() => setHoveredGraphNode(node.id)}
@@ -2325,32 +2577,60 @@ export default function App() {
                     </button>
                   );
                 })}
-                {graphNodes.length === 0 && <div className="graph-empty">No matching public graph metadata.</div>}
-              </div>
-              <aside className="graph-inspector">
-                {graphNode ? (
-                  <>
-                    <p className="section-label">Selected node</p>
-                    <h2>{graphNode.label}</h2>
+                </div>
+                <button
+                  className={`kairos-seam-node ${streamingAssistant || busy ? "is-routing" : ""}`}
+                  type="button"
+                  onClick={fitGraph}
+                  title={latestRoutes.length ? `Routed to ${latestRoutes.map((route) => route.name).join(", ")}` : "Kairos · fit whole brain"}
+                  aria-label="Kairos routing centre. Fit the whole brain graph."
+                >
+                  <span />
+                </button>
+                <div className="graph-camera-controls" aria-label="Graph zoom controls">
+                  <button type="button" onClick={() => zoomGraphBy(-0.2)} aria-label="Zoom out">−</button>
+                  <button type="button" onClick={() => zoomGraphBy(0.2)} aria-label="Zoom in">＋</button>
+                  <button type="button" onClick={fitGraph}>Fit</button>
+                  <button type="button" onClick={restoreGraphCamera} disabled={!previousGraphCamera}>Back</button>
+                  <span>{Math.round(graphCamera.scale * 100)}%</span>
+                </div>
+                <svg
+                  className="graph-minimap"
+                  viewBox="0 0 100 100"
+                  preserveAspectRatio="none"
+                  aria-label="Graph minimap"
+                  onPointerDown={(event) => centreGraphFromMinimap(event.clientX, event.clientY, event.currentTarget)}
+                  onPointerMove={(event) => {
+                    if (event.buttons === 1) centreGraphFromMinimap(event.clientX, event.clientY, event.currentTarget);
+                  }}
+                >
+                  {graphWorldEdges.map((edge) => {
+                    const source = graphNodeById.get(edge.source);
+                    const target = graphNodeById.get(edge.target);
+                    return source && target ? <line key={`mini-${edge.id ?? `${edge.source}-${edge.target}`}`} x1={source.x} y1={source.y} x2={target.x} y2={target.y} /> : null;
+                  })}
+                  {graphWorldNodes.map((node) => <circle key={`mini-${node.id}`} cx={node.x} cy={node.y} r={node.kind === "brain" ? 1.7 : 1} fill={brainVisual(node.brainId).color} />)}
+                  <rect className="graph-minimap__viewport" x={minimapViewport.x} y={minimapViewport.y} width={minimapViewport.width} height={minimapViewport.height} />
+                </svg>
+                {graphWorldNodes.length === 0 && <div className="graph-empty">No matching public graph metadata.</div>}
+                {graphNode && (
+                  <aside className="graph-inspector">
+                    <div className="graph-inspector__heading">
+                      <div><p className="section-label">Selected node</p><h2>{graphNode.label}</h2></div>
+                      <button className="icon-button" type="button" onClick={restoreGraphCamera} aria-label="Close node details">×</button>
+                    </div>
                     <RouteChips routes={[{ id: graphNode.brainId, name: brainVisual(graphNode.brainId).label }]} />
                     <p>{graphNode.kind === "bridge" ? "Registered cross-brain bridge" : graphNode.kind === "tag" ? "Tag metadata, not a file" : "Explicit metadata node"}</p>
                     {graphNode.relativePath && <code>{graphNode.relativePath}</code>}
                     {graphNode.kind === "tag" ? (
-                      <div className="graph-inspector__connections"><strong>Connected notes</strong>{graphEdges.filter((edge) => edge.source === graphNode.id || edge.target === graphNode.id).map((edge) => graphNodeById.get(edge.source === graphNode.id ? edge.target : edge.source)).filter((node): node is GraphNode => Boolean(node && node.kind !== "tag")).map((node) => <button key={node.id} className="text-action" onClick={() => setSelectedGraphNode(node.id)}>{node.label}</button>)}</div>
+                      <div className="graph-inspector__connections"><strong>Connected notes</strong>{graphEdges.filter((edge) => edge.source === graphNode.id || edge.target === graphNode.id).map((edge) => graphNodeById.get(edge.source === graphNode.id ? edge.target : edge.source)).filter((node): node is GraphNode => Boolean(node && node.kind !== "tag" && !isKairosGraphNode(node))).map((node) => <button key={node.id} className="text-action" onClick={() => focusGraphNode(node)}>{node.label}</button>)}</div>
                     ) : graphNode.kind === "note" || graphNode.kind === "bridge" || graphNode.kind === "brain" ? (
                       <button className="secondary-action" onClick={() => void revealGraphNode(graphNode.id)}>{graphNode.kind === "brain" ? "Open brain folder" : "Reveal in Finder"}</button>
                     ) : null}
-                    <small>Graph views metadata only. Kairos rechecks the source before Finder opens it.</small>
-                  </>
-                ) : (
-                  <>
-                    <p className="section-label">Progressive atlas</p>
-                    <h2>{graphNodes.length} visible nodes</h2>
-                    <p>Choose a node to inspect its safe metadata. Larger vaults progressively load up to the app’s graph limit.</p>
-                    <small>{graph.stale ? "Metadata is stale; refresh when the vault is available." : graph.indexedAt ? `Indexed ${shortDate(graph.indexedAt)}` : "Preview topology until your first metadata scan."}</small>
-                  </>
+                    <small>Metadata only. Kairos rechecks the source before Finder opens it.</small>
+                  </aside>
                 )}
-              </aside>
+              </div>
             </div>
           </section>
         )}
@@ -2363,7 +2643,10 @@ export default function App() {
                 <h1>Make Kairos yours.</h1>
                 <p>Brains remain authoritative. Kairos stores only connections, policies, and local app settings.</p>
               </div>
-              <button className="secondary-action" onClick={() => void refreshStatus()}>Refresh status</button>
+              <div className="surface-heading__actions">
+                <button className="secondary-action" onClick={() => void refreshStatus()}>Refresh status</button>
+                <button className="icon-button" type="button" onClick={() => setView("chat")} aria-label="Back to cockpit">×</button>
+              </div>
             </div>
 
             <section className="settings-card local-setup-card">
@@ -2435,7 +2718,7 @@ export default function App() {
               <article className="settings-card">
                 <div className="settings-card__heading"><div><p className="section-label">Summon</p><h2>Opening behaviour</h2></div><kbd>⌥ Space</kbd></div>
                 <label className="field-label"><span>Shortcut</span><input value={preferences.shortcut} onChange={(event) => setPreferences((current) => ({ ...current, shortcut: event.target.value }))} /></label>
-                <label className="field-label"><span>Open to</span><select value={preferences.summonTarget} onChange={(event) => setPreferences((current) => ({ ...current, summonTarget: event.target.value as "compact" | "last-page" }))}><option value="compact">Compact chat</option><option value="last-page">Last open page</option></select></label>
+                <div className="provider-boundary"><strong>Always opens compact chat</strong><span>The global shortcut returns to the focused chatbox. Use the Expand control when you want the full brain cockpit.</span></div>
                 <label className="toggle-row"><input type="checkbox" checked={preferences.launchAtLogin} onChange={(event) => setPreferences((current) => ({ ...current, launchAtLogin: event.target.checked }))} /><span><strong>Launch at login</strong><small>Keep Kairos ready in the menu bar.</small></span></label>
                 <label className="toggle-row"><input type="checkbox" checked={preferences.closeToHide} onChange={(event) => setPreferences((current) => ({ ...current, closeToHide: event.target.checked }))} /><span><strong>Hide when the window closes</strong><small>Keep Kairos running in the menu bar instead of quitting.</small></span></label>
                 <label className="toggle-row"><input type="checkbox" checked={preferences.keepAboveOtherWindows} onChange={(event) => setPreferences((current) => ({ ...current, keepAboveOtherWindows: event.target.checked }))} /><span><strong>Keep above other windows</strong><small>Off by default, so Kairos behaves like a normal window on this desktop.</small></span></label>
@@ -2444,7 +2727,7 @@ export default function App() {
                 {preferencesFeedback && <p className="settings-feedback">{preferencesFeedback}</p>}
               </article>
 
-              <article className="settings-card">
+              <article className="settings-card" id="provider-access-settings">
                 <div className="settings-card__heading"><div><p className="section-label">Provider</p><h2>Inference destination</h2></div><StatusPill tone={activeProvider.external ? "warning" : "local"}>{activeProvider.external ? "REVIEW" : "LOCAL"}</StatusPill></div>
                 <label className="field-label"><span>Active provider</span><select value={providerId} onChange={(event) => setProviderId(event.target.value as ProviderId)}>{providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}</select></label>
                 <p className="provider-detail">{activeProvider.detail}</p>
@@ -2471,7 +2754,7 @@ export default function App() {
               </article>
             </section>
 
-            <section className="settings-card brain-registry-card">
+            <section className="settings-card brain-registry-card" id="brain-registry-settings">
               <div className="settings-card__heading">
                 <div><p className="section-label">Brain registry</p><h2>Connected Obsidian brains</h2><p>Register a folder through the native picker, then explicitly choose its policy.</p></div>
                 <button className="primary-action" onClick={() => void pickBrainFolder()}>Add brain</button>
@@ -2517,7 +2800,7 @@ export default function App() {
               )}
             </section>
 
-            <section className="settings-card write-surface">
+            <section className="settings-card write-surface" id="confirmed-write-settings">
               <div className="settings-card__heading"><div><p className="section-label">Confirmed note update</p><h2>Draft, review, then write.</h2><p>Kairos only creates or edits Markdown inside an explicitly enabled brain directory. It never deletes or moves notes.</p></div><StatusPill tone="warning">CONFIRM</StatusPill></div>
               {!writeProposal ? (
                 writableBrains.length === 0 ? (
