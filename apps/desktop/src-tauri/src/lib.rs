@@ -9,6 +9,7 @@ use std::str::FromStr;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use globset::{Glob, GlobSetBuilder};
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
 use tauri::{
@@ -27,8 +28,8 @@ use kairos_core::{
     AccessDisposition, AppSettings, BrainRecord, BrainRole, BriefAnswer, CROSS_BRAIN_PULSE_QUERY,
     ChatAnswer, ConfirmedNoteWrite, ContentDestination, ContextPack, ConversationTurn,
     DEFAULT_CONTEXT_WINDOW_TOKENS, EgressPolicy, GraphBrainSource, GraphBuildOptions, GraphCluster,
-    GraphDiagnostic, GraphIndex, GraphNode, HardwareProfile, InferenceSettings, KairosConfig,
-    LocalModelArtifact, LocalModelChoice, LocalModelFitAssessment, LocalModelProfile,
+    GraphDiagnostic, GraphIndex, GraphNode, GraphNodeKind, HardwareProfile, InferenceSettings,
+    KairosConfig, LocalModelArtifact, LocalModelChoice, LocalModelFitAssessment, LocalModelProfile,
     LocalModelSettings, LocalModelVerification, LocalSetupSettings, MEMORY_BUDGET_PRESETS_GB,
     MemoryBudgetMode, NoteWriteConfirmation, NoteWriteKind, NoteWriteProposal, NoteWriteRequest,
     OllamaPullProgress, ProviderConfig, ProviderKind, SummonTarget, WritePolicy,
@@ -37,13 +38,14 @@ use kairos_core::{
     chat_with_codex_cli, chat_with_ollama, chat_with_openai_api, default_brain_read_policy,
     default_config_path, default_tharm_config, enforce_content_egress, evaluate_access,
     load_or_migrate_config, local_model_choices, local_model_profile, local_model_recommendations,
-    ollama_status, preflight_retrieval_access, pull_ollama_model as pull_model_from_ollama,
-    render_chat_prompt, stream_chat_with_ollama, synthesize_ollama,
-    test_ollama_model as test_local_ollama_model, write_config,
+    ollama_status, pull_ollama_model as pull_model_from_ollama, render_chat_prompt,
+    stream_chat_with_ollama, synthesize_ollama, test_ollama_model as test_local_ollama_model,
+    write_config,
 };
 
 const KEYCHAIN_SERVICE: &str = "com.tharm.kairos";
 const CLOUD_PREVIEW_TTL: Duration = Duration::from_secs(10 * 60);
+const SCOPED_EXECUTION_GRANT_TTL: Duration = Duration::from_secs(30 * 60);
 const MAX_GRAPH_SCAN_FILES: usize = 2_000;
 const MAX_BRAIN_INSPECTION_FILES: usize = 2_000;
 const MAX_TEMP_ATTACHMENTS: usize = 5;
@@ -54,6 +56,7 @@ const MAX_TEMP_ATTACHMENT_CHARS: usize = 16_000;
 struct AppState {
     folder_selections: Mutex<HashMap<String, PathBuf>>,
     cloud_previews: Mutex<HashMap<String, PendingCloudPreview>>,
+    scoped_execution_grants: Mutex<HashMap<String, ScopedExecutionGrant>>,
     write_proposals: Mutex<WriteProposalStore>,
     temporary_attachments: Mutex<HashMap<String, TemporaryAttachment>>,
     cancelled_pulls: Mutex<HashSet<String>>,
@@ -69,6 +72,25 @@ struct PendingCloudPreview {
     composed_message: String,
     attachment_ids: Vec<String>,
     created_at: SystemTime,
+}
+
+/// An opaque, native-issued session grant. It is deliberately not a Mac, shell,
+/// deletion, private-note, or egress grant; it only proves the user selected a
+/// bounded registered-brain scope for this session.
+#[derive(Clone)]
+struct ScopedExecutionGrant {
+    session_id: String,
+    provider_id: String,
+    brain_id: String,
+    expires_at: SystemTime,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScopedExecutionGrantView {
+    token: String,
+    brain_id: String,
+    expires_at: String,
 }
 
 #[derive(Clone)]
@@ -299,6 +321,7 @@ struct ChatProviderRequest {
     session_id: Option<String>,
     attachment_ids: Option<Vec<String>>,
     turn_id: Option<String>,
+    execution_grant: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1342,6 +1365,81 @@ fn take_confirmed_preview(
     Ok(preview)
 }
 
+#[tauri::command]
+fn grant_scoped_execution(
+    state: State<'_, AppState>,
+    session_id: String,
+    provider_id: String,
+    brain_id: String,
+) -> Result<ScopedExecutionGrantView, String> {
+    if session_id.trim().is_empty() || session_id.len() > 256 {
+        return Err("Start a local Kairos chat before granting scoped execution.".to_owned());
+    }
+    let path = config_path()?;
+    let config = load_app_config(&path)?;
+    let provider = provider_for_request(&config, Some(&provider_id))?;
+    let brain = config
+        .brains
+        .iter()
+        .find(|brain| brain.id == brain_id && brain.enabled)
+        .ok_or_else(|| "Choose an enabled registered brain for this session scope.".to_owned())?;
+    if brain.write_policy == WritePolicy::Prohibited {
+        return Err(
+            "That brain prohibits note writes, so it cannot receive an execution grant.".to_owned(),
+        );
+    }
+    let token = opaque_token("scoped-execution");
+    let expires_at = SystemTime::now() + SCOPED_EXECUTION_GRANT_TTL;
+    state
+        .scoped_execution_grants
+        .lock()
+        .map_err(|_| "Kairos scoped-execution state is unavailable.".to_owned())?
+        .insert(
+            token.clone(),
+            ScopedExecutionGrant {
+                session_id,
+                provider_id: provider.id,
+                brain_id: brain.id.clone(),
+                expires_at,
+            },
+        );
+    Ok(ScopedExecutionGrantView {
+        token,
+        brain_id: brain.id.clone(),
+        expires_at: chrono::DateTime::<chrono::Utc>::from(expires_at).to_rfc3339(),
+    })
+}
+
+fn validate_scoped_execution_grant(
+    state: &AppState,
+    token: Option<&str>,
+    session_id: Option<&str>,
+    provider_id: &str,
+    brain_id: Option<&str>,
+) -> Result<(), String> {
+    let token = token.ok_or_else(|| {
+        "Full access requires a current native scoped-execution grant.".to_owned()
+    })?;
+    let mut grants = state
+        .scoped_execution_grants
+        .lock()
+        .map_err(|_| "Kairos scoped-execution state is unavailable.".to_owned())?;
+    grants.retain(|_, grant| grant.expires_at > SystemTime::now());
+    let grant = grants.get(token).ok_or_else(|| {
+        "This scoped-execution grant has expired. Grant it again for this session.".to_owned()
+    })?;
+    if Some(grant.session_id.as_str()) != session_id
+        || grant.provider_id != provider_id
+        || brain_id.is_some_and(|brain| brain != grant.brain_id)
+    {
+        return Err(
+            "This scoped-execution grant does not match the current provider, chat, or brain."
+                .to_owned(),
+        );
+    }
+    Ok(())
+}
+
 async fn invoke_provider(
     provider: &ProviderConfig,
     config: &KairosConfig,
@@ -1379,6 +1477,7 @@ fn store_chat_exchange(
     message: &str,
     answer: &ChatAnswer,
     provider: &ProviderConfig,
+    context: &ContextPack,
 ) -> Result<String, String> {
     let path = storage::chat_archive_path()?;
     let mut archive = storage::load_chat_archive(&path)?;
@@ -1396,13 +1495,32 @@ fn store_chat_exchange(
             .find(|session| session.id == created.id)
             .expect("new session exists")
     };
-    storage::append_message(session, "user", message.to_owned(), Vec::new(), Vec::new());
+    storage::title_session_from_first_message(session, message);
+    let routes = context
+        .route
+        .brains
+        .iter()
+        .map(|brain| brain.id.clone())
+        .collect::<Vec<_>>();
+    storage::append_message(
+        session,
+        "user",
+        message.to_owned(),
+        Vec::new(),
+        Vec::new(),
+        None,
+        None,
+        routes.clone(),
+    );
     storage::append_message(
         session,
         "assistant",
         answer.content.clone(),
         answer.source_ids.clone(),
-        vec![provider.label.clone()],
+        Vec::new(),
+        Some(provider.id.clone()),
+        Some(provider.label.clone()),
+        routes,
     );
     let id = session.id.clone();
     storage::persist_chat_archive(&path, &archive)?;
@@ -1425,6 +1543,7 @@ async fn chat_with_provider(
         session_id,
         attachment_ids,
         turn_id,
+        execution_grant,
     } = request;
     if message.trim().is_empty() || message.len() > 32_000 {
         return Err("A chat message must contain at most 32,000 characters.".to_owned());
@@ -1432,6 +1551,15 @@ async fn chat_with_provider(
     let path = config_path()?;
     let config = load_app_config(&path)?;
     let provider = provider_for_request(&config, provider_id.as_deref())?;
+    if execution_grant.is_some() {
+        validate_scoped_execution_grant(
+            &state,
+            execution_grant.as_deref(),
+            session_id.as_deref(),
+            &provider.id,
+            brain_override.as_deref(),
+        )?;
+    }
     let attachment_ids = attachment_ids.unwrap_or_default();
     let (context, history, provider_message, consumed_attachment_ids) = if provider.is_external() {
         if !confirmed_external {
@@ -1493,7 +1621,7 @@ async fn chat_with_provider(
     } else {
         invoke_provider(&provider, &config, &context, &provider_message, &history).await?
     };
-    let session_id = store_chat_exchange(session_id, &message, &answer, &provider)?;
+    let session_id = store_chat_exchange(session_id, &message, &answer, &provider, &context)?;
     consume_temporary_attachments(&state, &consumed_attachment_ids);
     Ok(ChatResponse {
         answer: answer.content,
@@ -1502,6 +1630,53 @@ async fn chat_with_provider(
         provider_label: provider.label,
         session_id,
     })
+}
+
+#[tauri::command]
+fn list_chat_sessions(query: Option<String>) -> Result<Vec<storage::ChatSessionSummary>, String> {
+    let archive = storage::load_chat_archive(&storage::chat_archive_path()?)?;
+    Ok(storage::session_summaries(&archive, query.as_deref()))
+}
+
+#[tauri::command]
+fn load_chat_session(session_id: String) -> Result<storage::StoredChatSession, String> {
+    let archive = storage::load_chat_archive(&storage::chat_archive_path()?)?;
+    archive
+        .sessions
+        .into_iter()
+        .find(|session| session.id == session_id)
+        .ok_or_else(|| "That chat no longer exists.".to_owned())
+}
+
+#[tauri::command]
+fn create_chat_session() -> Result<storage::StoredChatSession, String> {
+    let path = storage::chat_archive_path()?;
+    let mut archive = storage::load_chat_archive(&path)?;
+    let session = storage::create_session(&mut archive, "New conversation");
+    storage::persist_chat_archive(&path, &archive)?;
+    Ok(session)
+}
+
+#[tauri::command]
+fn rename_chat_session(session_id: String, title: String) -> Result<(), String> {
+    let path = storage::chat_archive_path()?;
+    let mut archive = storage::load_chat_archive(&path)?;
+    storage::rename_session(&mut archive, &session_id, &title)?;
+    storage::persist_chat_archive(&path, &archive)
+}
+
+#[tauri::command]
+fn delete_chat_session(session_id: String) -> Result<(), String> {
+    let path = storage::chat_archive_path()?;
+    let mut archive = storage::load_chat_archive(&path)?;
+    storage::delete_session(&mut archive, &session_id)?;
+    storage::persist_chat_archive(&path, &archive)
+}
+
+#[tauri::command]
+fn clear_chat_history() -> Result<(), String> {
+    let path = storage::chat_archive_path()?;
+    storage::persist_chat_archive(&path, &storage::ChatArchive::default())
 }
 
 #[tauri::command]
@@ -1588,6 +1763,7 @@ async fn save_app_preferences(
     summon_target: String,
     launch_at_login: bool,
     close_to_hide: bool,
+    keep_above_other_windows: Option<bool>,
     context_window_tokens: u32,
     memory_budget_gb: Option<u16>,
     memory_budget_mode: Option<MemoryBudgetMode>,
@@ -1632,7 +1808,13 @@ async fn save_app_preferences(
         summon_target,
         launch_at_login,
         close_to_hide,
+        keep_above_other_windows: keep_above_other_windows.unwrap_or(false),
     };
+    if let Some(window) = app.get_webview_window("main") {
+        window
+            .set_always_on_top(config.app.keep_above_other_windows)
+            .map_err(|error| format!("could not update Kairos window layer: {error}"))?;
+    }
     config.ensure_current_version();
     if let Err(error) = write_config(&path, &config, true) {
         config.local_model = previous_settings;
@@ -1968,6 +2150,7 @@ fn create_brain(
             Vec::new()
         },
         graph_enabled,
+        graph_include_patterns: vec!["**/*.md".to_owned()],
     };
     let view = brain_view(&brain);
     config.brains.push(brain);
@@ -2064,8 +2247,7 @@ fn collect_graph_paths(brain: &BrainRecord) -> Vec<PathBuf> {
             }
             if !file_type.is_file()
                 || path.extension().and_then(|extension| extension.to_str()) != Some("md")
-                || preflight_retrieval_access(brain, &relative, &[]).ok()
-                    != Some(AccessDisposition::Allowed)
+                || !graph_path_allowed(brain, &relative)
             {
                 continue;
             }
@@ -2085,6 +2267,25 @@ fn collect_graph_paths(brain: &BrainRecord) -> Vec<PathBuf> {
     paths.sort();
     paths.dedup();
     paths
+}
+
+fn graph_path_allowed(brain: &BrainRecord, relative_path: &str) -> bool {
+    let mut builder = GlobSetBuilder::new();
+    let patterns = if brain.graph_include_patterns.is_empty() {
+        vec!["**/*.md".to_owned()]
+    } else {
+        brain.graph_include_patterns.clone()
+    };
+    for pattern in patterns {
+        let Ok(glob) = Glob::new(&pattern) else {
+            continue;
+        };
+        builder.add(glob);
+    }
+    builder
+        .build()
+        .map(|set| set.is_match(relative_path))
+        .unwrap_or(false)
 }
 
 fn graph_sources(config: &KairosConfig) -> Vec<GraphBrainSource> {
@@ -2147,6 +2348,75 @@ fn graph_snapshot() -> Result<GraphSnapshot, String> {
         stale,
         capped: index.capped,
     })
+}
+
+#[tauri::command]
+fn reveal_graph_node(node_id: String) -> Result<(), String> {
+    if node_id.trim().is_empty() || node_id.len() > 512 {
+        return Err("Choose a valid graph node first.".to_owned());
+    }
+    let path = config_path()?;
+    let config = load_app_config(&path)?;
+    let index = build_graph_index(&graph_sources(&config), GraphBuildOptions::default());
+    let node = index
+        .nodes
+        .iter()
+        .find(|node| node.id == node_id)
+        .ok_or_else(|| {
+            "That graph node is no longer available; refresh the atlas first.".to_owned()
+        })?;
+    match node.kind {
+        GraphNodeKind::Brain => {
+            let brain_id = node
+                .brain_id
+                .as_deref()
+                .ok_or_else(|| "This brain has no registered root.".to_owned())?;
+            let brain = config
+                .brains
+                .iter()
+                .find(|brain| brain.id == brain_id && brain.enabled && brain.graph_enabled)
+                .ok_or_else(|| "This graph brain is no longer enabled.".to_owned())?;
+            let root = fs::canonicalize(&brain.root_path)
+                .map_err(|_| "This brain root is currently unavailable.".to_owned())?;
+            system::open_in_finder(&root)
+        }
+        GraphNodeKind::Note | GraphNodeKind::Bridge => {
+            let brain_id = node
+                .brain_id
+                .as_deref()
+                .ok_or_else(|| "This graph note has no owning brain.".to_owned())?;
+            let relative_path = node
+                .relative_path
+                .as_deref()
+                .ok_or_else(|| "This graph note has no safe source path.".to_owned())?;
+            let brain = config
+                .brains
+                .iter()
+                .find(|brain| brain.id == brain_id && brain.enabled && brain.graph_enabled)
+                .ok_or_else(|| "This graph brain is no longer enabled.".to_owned())?;
+            if !graph_path_allowed(brain, relative_path) {
+                return Err("This graph note is no longer permitted for inspection.".to_owned());
+            }
+            let canonical = canonicalize_allowed_file(brain, relative_path)
+                .map_err(|error| error.to_string())?;
+            let markdown = fs::read_to_string(&canonical)
+                .map_err(|_| "This graph note is unavailable.".to_owned())?;
+            if evaluate_access(brain, relative_path, &markdown, &[])
+                .map_err(|error| error.to_string())?
+                != AccessDisposition::Allowed
+            {
+                return Err("This graph note is no longer permitted for inspection.".to_owned());
+            }
+            system::reveal_in_finder(&canonical)
+        }
+        GraphNodeKind::Tag => Err(
+            "A tag is metadata, not a file. Select one of its connected notes to reveal it."
+                .to_owned(),
+        ),
+        GraphNodeKind::Kairos => {
+            Err("Kairos is a virtual graph node and has no Finder location.".to_owned())
+        }
+    }
 }
 
 #[tauri::command]
@@ -2279,6 +2549,12 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
+            if let (Some(window), Ok(path)) = (app.get_webview_window("main"), config_path()) {
+                if let Ok(config) = load_app_config(&path) {
+                    let _ = window.set_always_on_top(config.app.keep_above_other_windows);
+                }
+            }
+
             app.global_shortcut().register(configured_shortcut())?;
             let show_item = MenuItem::with_id(app, "show", "Show Kairos", true, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit Kairos", true, None::<&str>)?;
@@ -2337,6 +2613,13 @@ pub fn run() {
             brief_with_ollama,
             chat_preview,
             chat_with_provider,
+            grant_scoped_execution,
+            list_chat_sessions,
+            load_chat_session,
+            create_chat_session,
+            rename_chat_session,
+            delete_chat_session,
+            clear_chat_history,
             save_provider_settings,
             save_app_preferences,
             list_brains,
@@ -2345,6 +2628,7 @@ pub fn run() {
             create_brain,
             update_brain_policy,
             graph_snapshot,
+            reveal_graph_node,
             draft_note_write,
             confirm_note_write
         ])

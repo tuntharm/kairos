@@ -43,6 +43,7 @@ type AppStatus = {
     summonTarget?: "compact_chat" | "last_surface";
     launchAtLogin?: boolean;
     closeToHide?: boolean;
+    keepAboveOtherWindows?: boolean;
   };
   providers?: Array<{
     id: string;
@@ -255,16 +256,36 @@ type NoteWriteProposal = {
   expiresAt: string;
 };
 
+type ChatSessionSummary = {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+};
+
+type StoredChatSession = ChatSessionSummary & {
+  messages: Array<{
+    id: string;
+    role: "user" | "assistant";
+    content: string;
+    createdAt: string;
+    sourceIds?: string[];
+    providerLabel?: string;
+    routeBrainIds?: string[];
+  }>;
+};
+
 type ProviderId = "ollama" | "openai" | "anthropic" | "codex-cli" | "claude-cli";
 type ViewId = "chat" | "next" | "map" | "settings";
 type MemoryBudget = "auto" | "custom" | 16 | 24 | 32 | 48 | 64 | 96 | 192;
 type KairosConsentMode = "ask" | "approve_local" | "full_kairos";
+type ScopedExecutionGrant = { token: string; brainId: string; providerId: ProviderId; sessionId: string; expiresAt: string };
 
 type BrainVisual = { label: string; color: string; icon: string };
 
 const briefQuestion = "What should I do next, and why?";
 const ollamaInstallUrl = "https://ollama.com/download/mac";
-const chatStorageKey = "kairos:chat-history:v1";
 
 const browserPreviewStatus: AppStatus = {
   configPath: "Browser preview",
@@ -448,7 +469,7 @@ const providers: Array<{ id: ProviderId; label: string; detail: string; external
   { id: "claude-cli", label: "Claude Code CLI", detail: "Explicit, ephemeral handoff", external: true },
 ];
 
-const kairosConsentModes: Array<{ id: KairosConsentMode; label: string; detail: string; available?: boolean }> = [
+const kairosConsentModes: Array<{ id: KairosConsentMode; label: string; detail: string }> = [
   {
     id: "ask",
     label: "Ask for approval",
@@ -461,9 +482,8 @@ const kairosConsentModes: Array<{ id: KairosConsentMode; label: string; detail: 
   },
   {
     id: "full_kairos",
-    label: "Full access · coming soon",
-    detail: "Not available in this alpha: Kairos cannot grant macOS, shell, or unconstrained filesystem access.",
-    available: false,
+    label: "Full access · scoped",
+    detail: "A 30-minute, brain-scoped session grant. It never grants shell, arbitrary Mac access, private notes, deletion, or cloud/CLI egress without the normal preview.",
   },
 ];
 
@@ -542,17 +562,6 @@ function defaultChatMessages(): ChatMessage[] {
     routes: [{ id: "everyday", name: "Everyday Life Brain" }],
     notice: true,
   }];
-}
-
-function readChatHistory(): ChatMessage[] {
-  try {
-    const saved = window.localStorage.getItem(chatStorageKey);
-    if (!saved) return defaultChatMessages();
-    const parsed = JSON.parse(saved);
-    return Array.isArray(parsed) && parsed.length > 0 ? parsed.slice(-60) : defaultChatMessages();
-  } catch {
-    return defaultChatMessages();
-  }
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -861,16 +870,19 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [capabilityNotice, setCapabilityNotice] = useState<string | null>(null);
   const [briefResult, setBriefResult] = useState<LocalBrief | null>(null);
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(readChatHistory);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>(defaultChatMessages);
   const [streamingAssistant, setStreamingAssistant] = useState<StreamingAssistant | null>(null);
   const [composer, setComposer] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
   const [providerId, setProviderId] = useState<ProviderId>("ollama");
   const [kairosConsentMode, setKairosConsentMode] = useState<KairosConsentMode>("ask");
+  const [scopedExecutionGrant, setScopedExecutionGrant] = useState<ScopedExecutionGrant | null>(null);
   const [brainOverride, setBrainOverride] = useState("auto");
   const [chatPreview, setChatPreview] = useState<ChatPreview | null>(null);
   const [chatSessionId, setChatSessionId] = useState<string | null>(null);
+  const [chatSessions, setChatSessions] = useState<ChatSessionSummary[]>([]);
+  const [chatSearch, setChatSearch] = useState("");
   const [providerModel, setProviderModel] = useState("");
   const [providerApiKey, setProviderApiKey] = useState("");
   const [providerSettingsBusy, setProviderSettingsBusy] = useState(false);
@@ -913,6 +925,7 @@ export default function App() {
     summonTarget: "compact" as "compact" | "last-page",
     launchAtLogin: false,
     closeToHide: true,
+    keepAboveOtherWindows: false,
     contextWindowTokens: 32_768,
   });
   const [preferencesFeedback, setPreferencesFeedback] = useState<string | null>(null);
@@ -1098,6 +1111,7 @@ export default function App() {
           summonTarget: nextStatus.app?.summonTarget === "last_surface" ? "last-page" : "compact",
           launchAtLogin: nextStatus.app?.launchAtLogin ?? current.launchAtLogin,
           closeToHide: nextStatus.app?.closeToHide ?? current.closeToHide,
+          keepAboveOtherWindows: nextStatus.app?.keepAboveOtherWindows ?? current.keepAboveOtherWindows,
           contextWindowTokens: nextStatus.model.contextWindowTokens ?? current.contextWindowTokens,
         }));
       }
@@ -1133,6 +1147,19 @@ export default function App() {
     const nextGraph = normalizeGraph(result);
     if (nextGraph) setGraph(nextGraph);
     setGraphBusy(false);
+  };
+
+  const revealGraphNode = async (nodeId: string) => {
+    if (!nativeRuntime) {
+      setCapabilityNotice("Reveal in Finder is available in the Kairos desktop app.");
+      return;
+    }
+    try {
+      await invoke("reveal_graph_node", { nodeId });
+      setCapabilityNotice("Opened the selected graph source in Finder.");
+    } catch (reason) {
+      setCapabilityNotice(reason instanceof Error ? reason.message : "Kairos could not reveal that graph item.");
+    }
   };
 
   useEffect(() => {
@@ -1238,13 +1265,95 @@ export default function App() {
     });
   }, [expanded, nativeRuntime]);
 
-  useEffect(() => {
+  const refreshChatSessions = async (query = chatSearch) => {
+    if (!nativeRuntime) return;
     try {
-      window.localStorage.setItem(chatStorageKey, JSON.stringify(chatMessages.slice(-60)));
-    } catch {
-      // Local chat persistence is best effort; the chat remains usable for this session.
+      const sessions = await invoke<ChatSessionSummary[]>("list_chat_sessions", { query: query.trim() || undefined });
+      setChatSessions(sessions);
+    } catch (reason) {
+      setCapabilityNotice(reason instanceof Error ? reason.message : "Kairos could not load chat history.");
     }
-  }, [chatMessages]);
+  };
+
+  const startNewChat = async () => {
+    if (!nativeRuntime) {
+      setChatSessionId(null);
+      setChatMessages(defaultChatMessages());
+      return;
+    }
+    try {
+      const session = await invoke<StoredChatSession>("create_chat_session");
+      setChatSessionId(session.id);
+      setChatMessages(defaultChatMessages());
+      await refreshChatSessions("");
+    } catch (reason) {
+      setCapabilityNotice(reason instanceof Error ? reason.message : "Kairos could not start a new chat.");
+    }
+  };
+
+  const loadChatSession = async (sessionId: string) => {
+    if (!nativeRuntime) return;
+    try {
+      const session = await invoke<StoredChatSession>("load_chat_session", { sessionId });
+      setChatSessionId(session.id);
+      setChatMessages(session.messages.length ? session.messages.map((message) => ({
+        id: message.id,
+        role: message.role,
+        body: message.content,
+        createdAt: message.createdAt,
+        provider: message.providerLabel,
+        routes: (message.routeBrainIds ?? []).map((id) => ({ id, name: brainVisual(id).label })),
+        citations: (message.sourceIds ?? []).map((id) => ({ id, brainId: id.split(":")[0] ?? "", relativePath: id.split(":").slice(1).join(":") })),
+      })) : defaultChatMessages());
+    } catch (reason) {
+      setCapabilityNotice(reason instanceof Error ? reason.message : "Kairos could not open that chat.");
+    }
+  };
+
+  const deleteChatSession = async (sessionId: string) => {
+    if (!nativeRuntime || !window.confirm("Delete this local Kairos chat? This cannot delete any brain notes.")) return;
+    try {
+      await invoke("delete_chat_session", { sessionId });
+      if (chatSessionId === sessionId) {
+        setChatSessionId(null);
+        setChatMessages(defaultChatMessages());
+      }
+      await refreshChatSessions("");
+    } catch (reason) {
+      setCapabilityNotice(reason instanceof Error ? reason.message : "Kairos could not delete that chat.");
+    }
+  };
+
+  const prepareChatLog = () => {
+    const brain = selectedBrain && canConfirmWrites(selectedBrain) ? selectedBrain : writableBrains[0];
+    if (!brain) {
+      setCapabilityNotice("Enable Confirm every write on a brain before saving a chat as a note.");
+      return;
+    }
+    const day = new Date().toISOString().slice(0, 10);
+    const transcript = chatMessages
+      .filter((message) => !message.notice)
+      .map((message) => `## ${message.role === "user" ? "You" : "Kairos"}\n\n${message.body}`)
+      .join("\n\n");
+    if (!transcript.trim()) {
+      setCapabilityNotice("Send at least one message before saving this chat to a brain.");
+      return;
+    }
+    setWriteProposal(null);
+    setWriteFeedback("Chat prepared as a local Markdown draft. Review the diff before anything is written.");
+    setWriteDraft({
+      brainId: brain.id,
+      kind: "create",
+      relativePath: `01_Daily/${day} Kairos Chat.md`,
+      markdown: `---\ntype: kairos_chat\ncreated: ${new Date().toISOString()}\n---\n\n# Kairos chat\n\n${transcript}\n`,
+    });
+    setExpanded(true);
+    setView("settings");
+  };
+
+  useEffect(() => {
+    if (nativeRuntime) void refreshChatSessions("");
+  }, [nativeRuntime]);
 
   useEffect(() => {
     if (view === "map") void refreshGraph();
@@ -1423,6 +1532,46 @@ export default function App() {
       await previewExternalTurn(message);
       return;
     }
+    let effectiveSessionId = chatSessionId;
+    let executionGrant: string | undefined;
+    if (kairosConsentMode === "full_kairos") {
+      if (!nativeRuntime) {
+        setCapabilityNotice("Scoped full access is available in the native Kairos app.");
+        return;
+      }
+      if (brainOverride === "auto") {
+        setError("Choose one brain in Route before granting scoped full access.");
+        return;
+      }
+      try {
+        if (!effectiveSessionId) {
+          const session = await invoke<StoredChatSession>("create_chat_session");
+          effectiveSessionId = session.id;
+          setChatSessionId(session.id);
+        }
+        const reusable = scopedExecutionGrant
+          && scopedExecutionGrant.sessionId === effectiveSessionId
+          && scopedExecutionGrant.providerId === providerId
+          && scopedExecutionGrant.brainId === brainOverride
+          && new Date(scopedExecutionGrant.expiresAt).valueOf() > Date.now();
+        if (reusable) {
+          executionGrant = scopedExecutionGrant.token;
+        } else {
+          const ok = window.confirm(`Grant Kairos scoped access to ${selectedBrain?.name ?? brainOverride} for this chat for 30 minutes? This never grants shell, arbitrary filesystem, deletion, private-note access, or unreviewed external sending.`);
+          if (!ok) return;
+          const grant = await invoke<{ token: string; brainId: string; expiresAt: string }>("grant_scoped_execution", {
+            sessionId: effectiveSessionId,
+            providerId,
+            brainId: brainOverride,
+          });
+          executionGrant = grant.token;
+          setScopedExecutionGrant({ ...grant, providerId, sessionId: effectiveSessionId });
+        }
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : "Kairos could not create the scoped-execution grant.");
+        return;
+      }
+    }
     const turnId = activeProvider.id === "ollama" ? makeId("turn") : undefined;
     setBusy(true);
     setError(null);
@@ -1454,9 +1603,10 @@ export default function App() {
             confirmedExternal,
             previewToken: chatPreview?.previewToken,
             history,
-            sessionId: chatSessionId,
+            sessionId: effectiveSessionId,
             attachmentIds: attachments.map((attachment) => attachment.id),
             turnId,
+            executionGrant,
           },
         },
         "Chat generation is not available in this native build yet. Your text has not been sent to another provider.",
@@ -1468,6 +1618,7 @@ export default function App() {
       if (typeof resultRecord?.sessionId === "string") {
         setChatSessionId(resultRecord.sessionId);
         setAttachments([]);
+        await refreshChatSessions("");
       }
       setChatMessages((messages) => [...messages, messageFromResult(result, fallback)]);
     } finally {
@@ -1707,6 +1858,7 @@ export default function App() {
         summonTarget: preferences.summonTarget,
         launchAtLogin: preferences.launchAtLogin,
         closeToHide: preferences.closeToHide,
+        keepAboveOtherWindows: preferences.keepAboveOtherWindows,
         contextWindowTokens: preferences.contextWindowTokens,
         memoryBudgetGb: memoryBudget === "auto" ? null : effectiveMemoryBudget,
         memoryBudgetMode: memoryBudget === "auto" ? "auto" : memoryBudget === "custom" ? "custom" : "preset",
@@ -1910,6 +2062,19 @@ export default function App() {
               </StatusPill>
             </div>
 
+            <div className="chat-session-bar">
+              <button className="secondary-action" type="button" onClick={() => void startNewChat()} disabled={busy}>New chat</button>
+              {chatMessages.some((message) => !message.notice) && <button className="text-action" type="button" onClick={prepareChatLog} disabled={busy}>Save chat to brain</button>}
+              {expanded && <label className="graph-search"><span className="sr-only">Search chat history</span><input value={chatSearch} onChange={(event) => { setChatSearch(event.target.value); void refreshChatSessions(event.target.value); }} placeholder="Search local chats" /></label>}
+              {expanded && chatSessionId && <button className="text-action" type="button" onClick={() => void deleteChatSession(chatSessionId)} disabled={busy}>Delete chat</button>}
+            </div>
+
+            {expanded && chatSessions.length > 0 && (
+              <aside className="chat-history" aria-label="Local chat history">
+                {chatSessions.map((session) => <div key={session.id} className={`chat-history__item ${session.id === chatSessionId ? "is-active" : ""}`}><button type="button" onClick={() => void loadChatSession(session.id)}><strong>{session.title}</strong><small>{session.messageCount} messages · {shortDate(session.updatedAt)}</small></button>{session.id !== chatSessionId && <button type="button" className="text-action" onClick={() => void deleteChatSession(session.id)} aria-label={`Delete ${session.title}`}>×</button>}</div>)}
+              </aside>
+            )}
+
             <div className="chat-context-bar chat-context-bar--route-only">
               <label>
                 <span>Route</span>
@@ -2041,7 +2206,7 @@ export default function App() {
                   <span className="composer-select__icon" aria-hidden="true">✋</span>
                   <span className="sr-only">Kairos execution and consent mode</span>
                   <select value={kairosConsentMode} onChange={(event) => setKairosConsentMode(event.target.value as KairosConsentMode)} aria-label="Kairos execution and consent mode" disabled={busy}>
-                    {kairosConsentModes.map((mode) => <option key={mode.id} value={mode.id} disabled={mode.available === false}>{mode.label}</option>)}
+                    {kairosConsentModes.map((mode) => <option key={mode.id} value={mode.id}>{mode.label}</option>)}
                   </select>
                 </label>
                 <label className="composer-select">
@@ -2079,7 +2244,7 @@ export default function App() {
                 </button>
               </div>
               <p className="composer-consent-note">
-                {activeKairosConsentMode.detail} This control does not bypass egress or write policy: cloud, API, and CLI turns always show a review before sending; note writes always require a diff confirmation.
+                {activeKairosConsentMode.detail} Cloud, API, and CLI turns always show a review before sending; note writes always require a diff confirmation.
               </p>
               {attachmentNotice && <p className="attachment-notice">{attachmentNotice}</p>}
             </form>
@@ -2232,8 +2397,14 @@ export default function App() {
                     <p className="section-label">Selected node</p>
                     <h2>{graphNode.label}</h2>
                     <RouteChips routes={[{ id: graphNode.brainId, name: brainVisual(graphNode.brainId).label }]} />
-                    <p>{graphNode.kind === "bridge" ? "Registered cross-brain bridge" : "Explicit metadata node"}</p>
-                    <small>Graph views metadata only. Open the source through its owning brain when needed.</small>
+                    <p>{graphNode.kind === "bridge" ? "Registered cross-brain bridge" : graphNode.kind === "tag" ? "Tag metadata, not a file" : "Explicit metadata node"}</p>
+                    {graphNode.relativePath && <code>{graphNode.relativePath}</code>}
+                    {graphNode.kind === "tag" ? (
+                      <div className="graph-inspector__connections"><strong>Connected notes</strong>{graphEdges.filter((edge) => edge.source === graphNode.id || edge.target === graphNode.id).map((edge) => graphNodeById.get(edge.source === graphNode.id ? edge.target : edge.source)).filter((node): node is GraphNode => Boolean(node && node.kind !== "tag")).map((node) => <button key={node.id} className="text-action" onClick={() => setSelectedGraphNode(node.id)}>{node.label}</button>)}</div>
+                    ) : graphNode.kind === "note" || graphNode.kind === "bridge" || graphNode.kind === "brain" ? (
+                      <button className="secondary-action" onClick={() => void revealGraphNode(graphNode.id)}>{graphNode.kind === "brain" ? "Open brain folder" : "Reveal in Finder"}</button>
+                    ) : null}
+                    <small>Graph views metadata only. Kairos rechecks the source before Finder opens it.</small>
                   </>
                 ) : (
                   <>
@@ -2331,6 +2502,7 @@ export default function App() {
                 <label className="field-label"><span>Open to</span><select value={preferences.summonTarget} onChange={(event) => setPreferences((current) => ({ ...current, summonTarget: event.target.value as "compact" | "last-page" }))}><option value="compact">Compact chat</option><option value="last-page">Last open page</option></select></label>
                 <label className="toggle-row"><input type="checkbox" checked={preferences.launchAtLogin} onChange={(event) => setPreferences((current) => ({ ...current, launchAtLogin: event.target.checked }))} /><span><strong>Launch at login</strong><small>Keep Kairos ready in the menu bar.</small></span></label>
                 <label className="toggle-row"><input type="checkbox" checked={preferences.closeToHide} onChange={(event) => setPreferences((current) => ({ ...current, closeToHide: event.target.checked }))} /><span><strong>Hide when the window closes</strong><small>Keep Kairos running in the menu bar instead of quitting.</small></span></label>
+                <label className="toggle-row"><input type="checkbox" checked={preferences.keepAboveOtherWindows} onChange={(event) => setPreferences((current) => ({ ...current, keepAboveOtherWindows: event.target.checked }))} /><span><strong>Keep above other windows</strong><small>Off by default, so Kairos behaves like a normal window on this desktop.</small></span></label>
                 <label className="field-label"><span>Context window</span><select value={preferences.contextWindowTokens} onChange={(event) => setPreferences((current) => ({ ...current, contextWindowTokens: Number(event.target.value) }))}><option value={16_384}>16K · lighter local load</option><option value={32_768}>32K · recommended start</option><option value={65_536}>64K · requires more memory</option></select></label>
                 <button className="secondary-action" onClick={() => void savePreferences()}>Save preferences</button>
                 {preferencesFeedback && <p className="settings-feedback">{preferencesFeedback}</p>}

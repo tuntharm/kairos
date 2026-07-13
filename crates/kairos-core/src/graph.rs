@@ -93,6 +93,7 @@ pub enum GraphNodeKind {
     Kairos,
     Brain,
     Note,
+    Bridge,
     Tag,
 }
 
@@ -106,6 +107,8 @@ pub enum GraphEdgeKind {
     WikiLink,
     Embed,
     MarkdownLink,
+    /// An explicit cross-brain bridge declared by safe frontmatter.
+    CrossBrainBridge,
     Tag,
 }
 
@@ -227,6 +230,7 @@ struct PreparedBrain {
     brain_id: String,
     cluster_index: usize,
     brain_node_id: Option<String>,
+    root: PathBuf,
     notes: Vec<PreparedNote>,
 }
 
@@ -370,6 +374,7 @@ pub fn build_graph_index(sources: &[GraphBrainSource], options: GraphBuildOption
             brain_id,
             cluster_index,
             brain_node_id,
+            root,
             notes,
         });
     }
@@ -434,6 +439,34 @@ pub fn build_graph_index(sources: &[GraphBrainSource], options: GraphBuildOption
                 }
             };
             let references = extract_explicit_references(&text);
+
+            if let Some(target) = bridge_source_of_truth(&text) {
+                if let Some(node) = index.nodes.iter_mut().find(|node| node.id == source_id) {
+                    node.kind = GraphNodeKind::Bridge;
+                }
+                if let Ok(target) = fs::canonicalize(target) {
+                    let target_brain = prepared_brains.iter().find(|candidate| {
+                        target.starts_with(&candidate.root) && candidate.brain_id != brain.brain_id
+                    });
+                    if let Some(target_brain) = target_brain {
+                        let exact_target = target_brain.notes.iter().find_map(|candidate| {
+                            (candidate.canonical_path == target)
+                                .then(|| candidate.node_id.clone())
+                                .flatten()
+                        });
+                        let target_id = exact_target.or_else(|| target_brain.brain_node_id.clone());
+                        if let Some(target_id) = target_id {
+                            push_edge(
+                                &mut index.edges,
+                                &mut edge_keys,
+                                source_id,
+                                &target_id,
+                                GraphEdgeKind::CrossBrainBridge,
+                            );
+                        }
+                    }
+                }
+            }
             drop(text);
 
             for reference in references.links {
@@ -732,7 +765,7 @@ pub fn extract_explicit_references(markdown: &str) -> ExplicitReferences {
 
     ExplicitReferences {
         links,
-        tags: extract_tags(&visible),
+        tags: extract_tags(&mask_link_spans(&visible)),
     }
 }
 
@@ -1089,6 +1122,76 @@ fn extract_tags(markdown: &str) -> Vec<String> {
     tags.into_iter().collect()
 }
 
+/// Replace Markdown link syntax with whitespace before tag scanning. A heading
+/// fragment such as `[[#Figure Index]]` is a link target, never a `#figure`
+/// tag node. Keeping newlines preserves the surrounding parser boundaries.
+fn mask_link_spans(markdown: &str) -> String {
+    let bytes = markdown.as_bytes();
+    let mut output = markdown.as_bytes().to_vec();
+    let mut index = 0;
+    while index < bytes.len() {
+        let wiki_start =
+            markdown[index..].starts_with("[[") || markdown[index..].starts_with("![[");
+        if wiki_start {
+            let start = index;
+            let content_start = index
+                + if markdown[index..].starts_with("![[") {
+                    3
+                } else {
+                    2
+                };
+            if let Some(relative_end) = markdown[content_start..].find("]]") {
+                let end = content_start + relative_end + 2;
+                for byte in &mut output[start..end] {
+                    if *byte != b'\n' {
+                        *byte = b' ';
+                    }
+                }
+                index = end;
+                continue;
+            }
+        }
+        if bytes[index] == b'[' && !markdown[index..].starts_with("[[") {
+            if let Some(label_end_offset) = markdown[index + 1..].find("](") {
+                let target_start = index + 1 + label_end_offset + 2;
+                if let Some(target_end_offset) = markdown[target_start..].find(')') {
+                    let end = target_start + target_end_offset + 1;
+                    for byte in &mut output[index..end] {
+                        if *byte != b'\n' {
+                            *byte = b' ';
+                        }
+                    }
+                    index = end;
+                    continue;
+                }
+            }
+        }
+        index += char_width(bytes[index]);
+    }
+    String::from_utf8(output).unwrap_or_else(|_| markdown.to_owned())
+}
+
+fn bridge_source_of_truth(markdown: &str) -> Option<PathBuf> {
+    let remaining = markdown.strip_prefix("---\n")?;
+    let end = remaining.find("\n---")?;
+    let mut is_bridge = false;
+    let mut source = None;
+    for line in remaining[..end].lines() {
+        if line.trim() == "type: bridge" {
+            is_bridge = true;
+        }
+        if let Some(value) = line.strip_prefix("source_of_truth:") {
+            let value = value.trim().trim_matches('"').trim_matches('\'');
+            if !value.is_empty() {
+                source = Some(PathBuf::from(value));
+            }
+        }
+    }
+    is_bridge
+        .then_some(source?)
+        .filter(|path| path.is_absolute())
+}
+
 /// CSS colour values look exactly like compact Obsidian tags (for example,
 /// `background:#22C55E`). Only ignore them when they occur in an inline HTML
 /// `style` attribute: a standalone `#c0ffee` is still a valid tag.
@@ -1201,6 +1304,7 @@ fn edge_kind_key(kind: &GraphEdgeKind) -> &'static str {
         GraphEdgeKind::WikiLink => "wiki",
         GraphEdgeKind::Embed => "embed",
         GraphEdgeKind::MarkdownLink => "markdown",
+        GraphEdgeKind::CrossBrainBridge => "bridge",
         GraphEdgeKind::Tag => "tag",
     }
 }
@@ -1504,5 +1608,53 @@ mod tests {
         assert!(!parsed.tags.contains(&"1".to_owned()));
         assert!(!parsed.tags.contains(&"22c55e".to_owned()));
         assert!(!parsed.tags.contains(&"0f08".to_owned()));
+    }
+
+    #[test]
+    fn parser_does_not_turn_wikilink_heading_fragments_into_tags() {
+        let parsed = extract_explicit_references("See [[#Figure Index]] and #real-tag.");
+        assert!(parsed.links.is_empty());
+        assert!(parsed.tags.contains(&"real-tag".to_owned()));
+        assert!(!parsed.tags.contains(&"figure".to_owned()));
+    }
+
+    #[test]
+    fn bridge_metadata_connects_registered_brains_without_exposing_a_path() {
+        let everyday = TempDir::new("bridge-everyday");
+        let phd = TempDir::new("bridge-phd");
+        everyday.write(
+            "06_Bridges/PhD Bridge.md",
+            &format!(
+                "---\ntype: bridge\nsource_of_truth: {}\n---\n# PhD bridge",
+                phd.path.join("00_System/Current Context.md").display()
+            ),
+        );
+        phd.write("00_System/Current Context.md", "# PhD context");
+        let sources = vec![
+            source(&everyday, &["06_Bridges/PhD Bridge.md"]),
+            GraphBrainSource {
+                brain_id: "phd".to_owned(),
+                brain_name: "PhD Brain".to_owned(),
+                root_path: phd.path.clone(),
+                allowlisted_markdown_paths: vec![PathBuf::from("00_System/Current Context.md")],
+                protected_relative_paths: Vec::new(),
+            },
+        ];
+        let index = build_graph_index(&sources, GraphBuildOptions::default());
+        assert!(index.nodes.iter().any(|node| {
+            node.id == "note:everyday:06_Bridges/PhD Bridge.md"
+                && node.kind == GraphNodeKind::Bridge
+        }));
+        assert!(index.edges.iter().any(|edge| {
+            edge.kind == GraphEdgeKind::CrossBrainBridge
+                && edge.source == "note:everyday:06_Bridges/PhD Bridge.md"
+                && edge.target == "note:phd:00_System/Current Context.md"
+        }));
+        assert!(
+            index
+                .nodes
+                .iter()
+                .all(|node| !node.label.contains(&phd.path.display().to_string()))
+        );
     }
 }

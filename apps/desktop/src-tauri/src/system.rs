@@ -76,6 +76,39 @@ pub fn open_ollama_install_page() -> Result<(), String> {
     }
 }
 
+pub fn reveal_in_finder(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("/usr/bin/open")
+            .arg("-R")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("could not reveal item in Finder: {error}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        Err("Finder reveal is currently available on macOS only.".to_owned())
+    }
+}
+
+pub fn open_in_finder(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("/usr/bin/open")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("could not open folder in Finder: {error}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = path;
+        Err("Finder opening is currently available on macOS only.".to_owned())
+    }
+}
+
 pub fn known_program_path(program: &str) -> Option<std::path::PathBuf> {
     let mut candidates = std::env::var_os("PATH")
         .into_iter()

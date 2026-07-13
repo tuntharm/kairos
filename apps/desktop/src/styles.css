@@ -673,6 +673,18 @@ pre { max-height: 210px; overflow: auto; margin: 0; border-top: 1px solid rgba(1
 .write-policy-empty strong { color: #ffe0a1; }
 .write-policy-empty em { color: var(--kairos-ivory); font-style: normal; font-weight: 700; }
 
+.chat-session-bar { display: flex; align-items: center; gap: 9px; margin: 4px 0 12px; }
+.chat-session-bar .graph-search { flex: 1; }
+.chat-session-bar .graph-search input { width: 100%; }
+.chat-history { display: grid; gap: 5px; max-height: 178px; overflow: auto; margin: 0 0 12px; border: 1px solid rgba(118, 228, 255, .16); border-radius: var(--kairos-radius-md); padding: 6px; background: rgba(3, 8, 20, .3); }
+.chat-history__item { display: flex; align-items: center; gap: 8px; border-radius: 9px; padding: 2px 5px; }
+.chat-history__item.is-active { background: rgba(118, 228, 255, .1); }
+.chat-history__item > button:first-child { display: grid; flex: 1; min-width: 0; gap: 2px; border: 0; padding: 6px 3px; color: var(--kairos-text); background: transparent; text-align: left; cursor: pointer; }
+.chat-history__item strong { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.chat-history__item small { color: var(--kairos-text-secondary); font-size: 10px; }
+.graph-inspector__connections { display: flex; flex-wrap: wrap; gap: 6px; margin: 9px 0 0; }
+.graph-inspector__connections button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .kairos-loader { overflow: visible; color: var(--kairos-routing-blue); }
 .kairos-loader__ring { transform-origin: 32px 32px; animation: kairos-rotate 1.8s linear infinite; }
 .kairos-loader__core { transform-origin: 32px 32px; animation: kairos-pulse 1.2s ease-in-out infinite; }

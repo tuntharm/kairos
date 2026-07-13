@@ -309,6 +309,7 @@ fn global_router_policy() -> BrainRecord {
         write_policy: WritePolicy::ReadOnly,
         write_directories: Vec::new(),
         graph_enabled: false,
+        graph_include_patterns: Vec::new(),
     }
 }
 
@@ -680,6 +681,7 @@ mod tests {
                 write_policy: WritePolicy::ReadOnly,
                 write_directories: Vec::new(),
                 graph_enabled: true,
+                graph_include_patterns: vec!["**/*.md".to_owned()],
             }],
         };
         (config, directory)

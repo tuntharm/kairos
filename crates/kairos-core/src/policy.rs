@@ -288,6 +288,7 @@ mod tests {
             write_policy: WritePolicy::ReadOnly,
             write_directories: Vec::new(),
             graph_enabled: true,
+            graph_include_patterns: vec!["**/*.md".to_owned()],
         }
     }
 

@@ -13,6 +13,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 chrono.workspace = true
+globset.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tauri = { version = "2", features = ["image-png", "tray-icon"] }

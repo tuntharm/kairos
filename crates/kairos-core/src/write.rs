@@ -1031,6 +1031,7 @@ mod tests {
             write_policy: WritePolicy::ProposeConfirm,
             write_directories: vec!["Notes".to_owned(), "90_Private".to_owned()],
             graph_enabled: true,
+            graph_include_patterns: vec!["**/*.md".to_owned()],
         }
     }
 

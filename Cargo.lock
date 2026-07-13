@@ -2188,6 +2188,7 @@ name = "kairos-desktop"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "globset",
  "kairos-core",
  "keyring",
  "serde",

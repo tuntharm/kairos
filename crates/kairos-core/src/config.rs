@@ -73,6 +73,11 @@ pub struct AppSettings {
     pub launch_at_login: bool,
     #[serde(default = "default_close_to_hide")]
     pub close_to_hide: bool,
+    /// A normal window is the default. This is deliberately separate from
+    /// workspace visibility so users can opt into a floating palette without
+    /// making Kairos appear on every macOS Space.
+    #[serde(default)]
+    pub keep_above_other_windows: bool,
 }
 
 fn default_close_to_hide() -> bool {
@@ -86,6 +91,7 @@ impl Default for AppSettings {
             summon_target: SummonTarget::CompactChat,
             launch_at_login: false,
             close_to_hide: true,
+            keep_above_other_windows: false,
         }
     }
 }
@@ -1424,10 +1430,18 @@ pub struct BrainRecord {
     /// Graph indexing is separately opt-in from text retrieval.
     #[serde(default = "default_graph_enabled")]
     pub graph_enabled: bool,
+    /// Graph scope is metadata-only and intentionally independent from chat
+    /// retrieval. Older registries safely default to all non-protected notes.
+    #[serde(default = "default_graph_include_patterns")]
+    pub graph_include_patterns: Vec<String>,
 }
 
 fn default_graph_enabled() -> bool {
     true
+}
+
+fn default_graph_include_patterns() -> Vec<String> {
+    vec!["**/*.md".to_owned()]
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1732,6 +1746,7 @@ pub fn default_tharm_config() -> Result<KairosConfig> {
             "07_Decisions".to_owned(),
         ],
         graph_enabled: true,
+        graph_include_patterns: default_graph_include_patterns(),
     };
 
     let phd = BrainRecord {
@@ -1753,6 +1768,7 @@ pub fn default_tharm_config() -> Result<KairosConfig> {
         write_policy: WritePolicy::ReadOnly,
         write_directories: Vec::new(),
         graph_enabled: true,
+        graph_include_patterns: default_graph_include_patterns(),
     };
 
     let datter = BrainRecord {
@@ -1776,6 +1792,7 @@ pub fn default_tharm_config() -> Result<KairosConfig> {
         write_policy: WritePolicy::ReadOnly,
         write_directories: Vec::new(),
         graph_enabled: true,
+        graph_include_patterns: default_graph_include_patterns(),
     };
 
     let border = BrainRecord {
@@ -1801,6 +1818,7 @@ pub fn default_tharm_config() -> Result<KairosConfig> {
         write_policy: WritePolicy::Prohibited,
         write_directories: Vec::new(),
         graph_enabled: false,
+        graph_include_patterns: default_graph_include_patterns(),
     };
 
     Ok(KairosConfig {

@@ -5,8 +5,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 const CHAT_ARCHIVE_VERSION: u32 = 1;
-const MAX_STORED_SESSIONS: usize = 100;
-const MAX_STORED_MESSAGES_PER_SESSION: usize = 160;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -19,6 +17,12 @@ pub struct StoredChatMessage {
     pub source_ids: Vec<String>,
     #[serde(default)]
     pub attachment_names: Vec<String>,
+    #[serde(default)]
+    pub provider_id: Option<String>,
+    #[serde(default)]
+    pub provider_label: Option<String>,
+    #[serde(default)]
+    pub route_brain_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -38,6 +42,16 @@ pub struct ChatArchive {
     pub version: u32,
     #[serde(default)]
     pub sessions: Vec<StoredChatSession>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSessionSummary {
+    pub id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub message_count: usize,
 }
 
 impl Default for ChatArchive {
@@ -68,10 +82,6 @@ pub fn load_chat_archive(path: &Path) -> Result<ChatArchive, String> {
         return Err("chat archive was written by a newer Kairos version".to_owned());
     }
     archive.version = CHAT_ARCHIVE_VERSION;
-    archive.sessions.truncate(MAX_STORED_SESSIONS);
-    for session in &mut archive.sessions {
-        session.messages.truncate(MAX_STORED_MESSAGES_PER_SESSION);
-    }
     Ok(archive)
 }
 
@@ -105,7 +115,6 @@ pub fn create_session(archive: &mut ChatArchive, initial_message: &str) -> Store
         messages: Vec::new(),
     };
     archive.sessions.insert(0, session.clone());
-    archive.sessions.truncate(MAX_STORED_SESSIONS);
     session
 }
 
@@ -115,6 +124,9 @@ pub fn append_message(
     content: String,
     source_ids: Vec<String>,
     attachment_names: Vec<String>,
+    provider_id: Option<String>,
+    provider_label: Option<String>,
+    route_brain_ids: Vec<String>,
 ) -> StoredChatMessage {
     let message = StoredChatMessage {
         id: unique_id("message"),
@@ -123,14 +135,60 @@ pub fn append_message(
         created_at: now_rfc3339(),
         source_ids,
         attachment_names,
+        provider_id,
+        provider_label,
+        route_brain_ids,
     };
     session.messages.push(message.clone());
-    if session.messages.len() > MAX_STORED_MESSAGES_PER_SESSION {
-        let excess = session.messages.len() - MAX_STORED_MESSAGES_PER_SESSION;
-        session.messages.drain(..excess);
-    }
     session.updated_at = message.created_at.clone();
     message
+}
+
+pub fn session_summaries(archive: &ChatArchive, query: Option<&str>) -> Vec<ChatSessionSummary> {
+    let query = query.unwrap_or_default().trim().to_lowercase();
+    let mut sessions = archive
+        .sessions
+        .iter()
+        .filter(|session| query.is_empty() || session.title.to_lowercase().contains(&query))
+        .map(|session| ChatSessionSummary {
+            id: session.id.clone(),
+            title: session.title.clone(),
+            created_at: session.created_at.clone(),
+            updated_at: session.updated_at.clone(),
+            message_count: session.messages.len(),
+        })
+        .collect::<Vec<_>>();
+    sessions.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
+    sessions
+}
+
+pub fn rename_session(archive: &mut ChatArchive, id: &str, title: &str) -> Result<(), String> {
+    let title = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if title.is_empty() || title.chars().count() > 100 {
+        return Err("Chat titles must contain 1–100 characters.".to_owned());
+    }
+    let session = archive
+        .sessions
+        .iter_mut()
+        .find(|session| session.id == id)
+        .ok_or_else(|| "That chat no longer exists.".to_owned())?;
+    session.title = title;
+    session.updated_at = now_rfc3339();
+    Ok(())
+}
+
+pub fn delete_session(archive: &mut ChatArchive, id: &str) -> Result<(), String> {
+    let before = archive.sessions.len();
+    archive.sessions.retain(|session| session.id != id);
+    (archive.sessions.len() != before)
+        .then_some(())
+        .ok_or_else(|| "That chat no longer exists.".to_owned())
+}
+
+pub fn title_session_from_first_message(session: &mut StoredChatSession, message: &str) {
+    if session.title == "New conversation" && !message.trim().is_empty() {
+        session.title = title_for(message);
+    }
 }
 
 fn title_for(message: &str) -> String {
@@ -174,6 +232,9 @@ mod tests {
             "How should I plan this week?".to_owned(),
             Vec::new(),
             vec!["draft.md".to_owned()],
+            None,
+            None,
+            Vec::new(),
         );
         archive.sessions[0] = session;
         persist_chat_archive(&path, &archive).unwrap();
