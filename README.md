@@ -58,10 +58,12 @@ provenance, and local application settings—not your knowledge base.
   and explicitly confirm the change. It cannot delete, move, or run arbitrary
   shell commands.
 
-## Privacy and safety model
+## Privacy and control model
 
 Kairos is designed around a simple boundary: **the user decides what is
 connected, retrieved, sent, and written.**
+
+These are developer-alpha design controls, not a security audit or guarantee.
 
 | Boundary | Kairos behaviour |
 | --- | --- |
@@ -110,9 +112,14 @@ and release notes with a verified checksum.
 
 ### For developers and maintainers
 
-The repository can be built on macOS for development. It requires a current
-Rust toolchain, Node.js with pnpm, and the usual macOS/Xcode command-line build
-tools for Tauri.
+The repository can be built on macOS for development. Before starting, install:
+
+- a current Rust toolchain;
+- Node.js and pnpm; and
+- the macOS/Xcode command-line build tools required by Tauri.
+
+Ollama is also needed when exercising local-model features, but not for a
+frontend-only build or test run.
 
 ```bash
 git clone https://github.com/tuntharm/kairos.git
@@ -179,6 +186,7 @@ Tauri desktop app
 ```bash
 cargo fmt --all --check
 cargo test --workspace
+pnpm --dir apps/desktop run test
 pnpm --dir apps/desktop run build
 pnpm desktop:build
 ```
@@ -188,8 +196,8 @@ pnpm desktop:build
 External contribution guidelines and a public licence have not yet been
 published. The repository is currently marked `UNLICENSED`; visibility of the
 source is not permission to redistribute it or ship derivative builds. If you
-would like to work with Kairos, please open an issue once the repository is
-public, or contact the maintainer through the repository profile.
+would like to work with Kairos, open an issue to discuss the fit or contact the
+maintainer through the repository profile.
 
 ## Principles
 
