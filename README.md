@@ -1,4 +1,8 @@
-# Kairos
+<p align="center">
+  <img src="design/assets/brand/kairos-app-icon-1024.png" alt="Kairos app icon" width="116">
+</p>
+
+<h1 align="center">Kairos</h1>
 
 > A private-by-default desktop companion for asking questions across the notes
 > you deliberately connect.
@@ -74,6 +78,17 @@ connected, retrieved, sent, and written.**
 Kairos uses [Ollama](https://ollama.com/) for local models. The app can open the
 official Ollama installer when it is missing; after Ollama is running, models
 are downloaded through Ollama from within Kairos.
+
+<p align="center">
+  <a href="https://ollama.com/"><img src="https://img.shields.io/badge/Ollama-local%20runtime-111111?style=for-the-badge&logo=ollama&logoColor=white" alt="Ollama local runtime"></a>
+  <img src="https://img.shields.io/badge/Qwen-3.6%2035B%20MLX-615FFF?style=for-the-badge&logo=alibabacloud&logoColor=white" alt="Qwen 3.6 35B MLX">
+  <img src="https://img.shields.io/badge/GPT--OSS-20B-10A37F?style=for-the-badge&logo=openai&logoColor=white" alt="GPT-OSS 20B">
+  <img src="https://img.shields.io/badge/GLM-4.7%20Flash-2864DC?style=for-the-badge" alt="GLM 4.7 Flash">
+</p>
+
+<p align="center">
+  <sub>Choose the model explicitly. Kairos recommends a safe fit for your hardware, then runs it on your Mac through Ollama.</sub>
+</p>
 
 - The model selector is explicit—Kairos never silently changes model or lowers
   the configured context window.
