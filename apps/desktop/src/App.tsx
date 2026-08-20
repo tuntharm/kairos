@@ -16,6 +16,10 @@ import {
   settleAtlasPhysics,
   type AtlasPhysicsController,
 } from "./atlasPhysics";
+import { expandedWorkspace, type ViewId, type WorkspaceId } from "./appView";
+import { SpecialistResponseIdentity } from "./components/SpecialistResponseIdentity";
+import { SpecialistFoundry } from "./features/specialistFoundry/SpecialistFoundry";
+import type { SpecialistExecutionV1 } from "./native/specialistContracts";
 
 import brandMark from "../../../design/assets/brand/kairos-mark-gradient.svg";
 import brandWordmark from "../../../design/assets/brand/kairos-wordmark-dark.svg";
@@ -243,6 +247,7 @@ type ChatMessage = {
   routes?: Array<{ id: string; name: string }>;
   citations?: Citation[];
   provider?: string;
+  specialistExecution?: SpecialistExecutionV1;
   notice?: boolean;
 };
 
@@ -297,11 +302,9 @@ type StoredChatSession = ChatSessionSummary & {
 };
 
 type ProviderId = "ollama" | "openai" | "anthropic" | "codex-cli" | "claude-cli";
-type WorkspaceId = "atlas" | "next" | "lab" | "settings";
 type ManagerModelRole = "fast" | "general" | "premium";
 type ModelReasoningMode = "none" | "optional" | "required";
-type ViewId = "chat" | WorkspaceId;
-type NavId = "atlas" | "next" | "lab" | "settings";
+type NavId = WorkspaceId;
 type SurfaceMode = "compact" | "cockpit";
 type SettingsAnchor = "top" | "brains" | "privacy" | "writes";
 type MemoryBudget = "auto" | "custom" | 16 | 24 | 32 | 48 | 64 | 96 | 192;
@@ -1377,6 +1380,7 @@ export default function App() {
   };
 
   const refreshBrains = async () => {
+    if (!nativeRuntime) return;
     const result = await callFeature<unknown>(
       "list_brains",
       undefined,
@@ -1387,6 +1391,7 @@ export default function App() {
   };
 
   const refreshGraph = async () => {
+    if (!nativeRuntime) return;
     setGraphBusy(true);
     const result = await callFeature<unknown>(
       "graph_snapshot",
@@ -1619,10 +1624,6 @@ export default function App() {
         }
         return;
       }
-      if (view !== "chat" && view !== "atlas" && view !== "lab") {
-        setView("chat");
-        return;
-      }
       setView("chat");
       setSurfaceMode("compact");
     };
@@ -1768,7 +1769,7 @@ export default function App() {
 
   const runPulse = async () => {
     if (activeProvider.external) {
-      setView("chat");
+      setView("atlas");
       setSurfaceMode("cockpit");
       setComposer(briefQuestion);
       await previewExternalTurn(briefQuestion);
@@ -2071,19 +2072,6 @@ export default function App() {
       await refreshStatus();
     }
     setModelOperation(null);
-  };
-
-  const runLocalBenchmark = async (model: string) => {
-    setSetupFeedback(`Running the bounded 32K readiness benchmark for ${model}…`);
-    const result = await callFeature<Record<string, unknown>>(
-      "benchmark_local_model",
-      { request: { model, prompt: "Kairos fixed local benchmark suite" } },
-      "The native benchmark command is not available in this build yet.",
-    );
-    if (result) {
-      const passed = result.passed === true;
-      setSetupFeedback(`${model}: ${passed ? "passed" : "did not pass"} · ${typeof result.totalAnswerLatencyMs === "number" ? `${result.totalAnswerLatencyMs} ms total` : "timing recorded"}. No model or context was changed.`);
-    }
   };
 
   const openOllamaInstall = async () => {
@@ -2568,7 +2556,7 @@ export default function App() {
     }
   }, [graphNodes, selectedGraphNode]);
 
-  const showView = (nextView: ViewId) => {
+  const showView = (nextView: WorkspaceId) => {
     if (nextView === "settings") setSettingsAnchor("top");
     setView(nextView);
     setSurfaceMode("cockpit");
@@ -2627,6 +2615,84 @@ export default function App() {
     );
   };
 
+  const toggleHistory = () => {
+    const opening = !historyOpen;
+    setHistoryOpen(opening);
+    if (!opening) return;
+    if (!expanded) {
+      setView(expandedWorkspace(view));
+      setSurfaceMode("cockpit");
+    }
+    void refreshChatSessions(chatSearch);
+  };
+
+  const localModelSetup = (
+    <section className="settings-card local-setup-card">
+      <div className="settings-card__heading">
+        <div><p className="section-label">Local AI setup</p><h2>{setupState.title}</h2><p>{setupState.detail}</p></div>
+        <StatusPill tone={setupState.tone}>{ollamaRunning ? "OLLAMA" : "SETUP"}</StatusPill>
+      </div>
+      <div className="hardware-grid">
+        <div><span>{primaryFitLimitLabel}</span><strong>{primaryFitLimitGb ? `${primaryFitLimitGb} GB` : "Detecting…"}</strong><small>{hardwareProfileLabel}{hardwarePlanningOverride ? " · Manual planning override." : " · Auto-detected."}</small></div>
+        <div><span>Free disk</span><strong>{availableDiskGb ? `${availableDiskGb} GB` : "Detecting…"}</strong><small>Download packages are stored by Ollama.</small></div>
+        <div><span>Recommendation context</span><strong>32K</strong><small>Fit and tests stay at 32K; Kairos never lowers it silently.</small></div>
+      </div>
+      <div className="memory-setup-row">
+        <div className="memory-controls">
+          <label className="hardware-profile-control"><span>Hardware profile</span><select value={hardwareProfile} disabled={planningBusy} onChange={(event) => void applyHardwareProfile(event.target.value as HardwareProfile)}>
+            <option value="auto">Auto ({hardwareProfileLabel})</option>
+            <optgroup label="Manual planning override">
+              <option value="apple_unified">Apple unified memory</option>
+              <option value="nvidia_vram">NVIDIA VRAM</option>
+              <option value="cpu_only">CPU-only</option>
+            </optgroup>
+          </select></label>
+          <label className="memory-budget-control"><span>Memory budget</span><select value={String(memoryBudget)} disabled={planningBusy} onChange={(event) => {
+            const nextBudget = (event.target.value === "auto" || event.target.value === "custom" ? event.target.value : Number(event.target.value)) as MemoryBudget;
+            setMemoryBudget(nextBudget);
+            if (nextBudget !== "custom") void applyMemoryBudget(nextBudget);
+          }}>
+            <option value="auto">{primaryFitLimitGb ? `Auto (${primaryFitLimitGb} GB fit limit)` : "Auto (detect hardware)"}</option>
+            {[16, 24, 32, 48, 64, 96, 192].map((amount) => <option key={amount} value={amount}>{amount} GB</option>)}
+            <option value="custom">Custom</option>
+          </select></label>
+          {memoryBudget === "custom" && <label className="custom-memory-budget-control"><span>Custom budget (GB)</span><input type="number" min="1" max="192" value={customMemoryBudget} disabled={planningBusy} onChange={(event) => setCustomMemoryBudget(event.target.value)} /></label>}
+          <div className="memory-budget-copy">
+            <strong>{effectiveMemoryBudget} GB preference cap</strong>
+            <p>{localSetup?.memoryBudgetMessage ?? "This is a planning preference, not a claim about installed hardware. Changing it re-ranks guidance only; Kairos does not change your model or context automatically."}</p>
+            <p>Fit uses {primaryFitLimitLabel.toLowerCase()}{primaryFitLimitGb ? ` (${primaryFitLimitGb} GB)` : ""} for one 32K conversation.</p>
+            {memoryBudgetPending && <span className="memory-plan-pending">Pending apply — the shortlist below still reflects your saved budget.</span>}
+            {memoryBudget === "custom" && <button className="text-action" type="button" onClick={() => void applyMemoryBudget("custom")} disabled={planningBusy}>Apply custom budget</button>}
+          </div>
+        </div>
+        <aside className={`ollama-health ${ollamaRunning ? "is-running" : "is-warning"}`} aria-label="Ollama setup health">
+          <div className="ollama-health__heading"><div><p className="section-label">Ollama</p><h3>{!ollamaInstalled ? "Not installed" : ollamaRunning ? "Running locally" : "Installed, not running"}</h3></div><StatusPill tone={ollamaRunning ? "success" : "warning"}>{ollamaRunning ? "READY" : "SETUP"}</StatusPill></div>
+          <p>{ollamaRunning ? `${localSetup?.endpoint ?? "http://localhost:11434"} · ${status?.model.installedModels.length ?? 0} installed model${(status?.model.installedModels.length ?? 0) === 1 ? "" : "s"}` : localSetup?.setupMessage ?? "Check the local Ollama service before using a local model."}</p>
+          {!ollamaInstalled ? <button className="primary-action" type="button" onClick={() => void openOllamaInstall()}>{localSetup?.ollamaInstallAction?.label ?? "Install Ollama"}</button> : <button className="secondary-action" type="button" onClick={() => void refreshStatus()}>Refresh status</button>}
+        </aside>
+      </div>
+      {selectedModelCard && (
+        <aside className={`memory-fit current-model-fit memory-fit--${currentModelFit?.fit ?? "unknown"}`}>
+          <div><StatusPill tone={modelFitTone(currentModelFit)}>{modelFitLabel(currentModelFit).toUpperCase()}</StatusPill><strong>Current model · <code>{selectedModelCard.id}</code> · 32K</strong></div>
+          {currentModelFit?.fit === "not_recommended" ? <p><strong>Current model is not recommended for {primaryFitLimitLabel} {primaryFitLimitGb ? `${primaryFitLimitGb} GB` : "at the detected limit"} at 32K context.</strong> {currentModelFit.message}</p> : <p>{currentModelFit?.message ?? "Kairos keeps your current model visible and will never switch it automatically."}</p>}
+          <div className="current-model-fit__actions">
+            <button className="secondary-action" type="button" onClick={scrollToRecommendations} disabled={recommendedModelCards.length === 0}>Choose a recommended model</button>
+            {selectedModelCard.installed ? <button className="text-action" type="button" onClick={() => void handleTestModel(selectedModelCard.id)} disabled={Boolean(modelOperation) || planningBusy}>{modelOperation?.kind === "test" && sameModelId(modelOperation.model, selectedModelCard.id) ? "Testing…" : "Test current at 32K"}</button> : <><button className="text-action" type="button" onClick={() => void handlePullModel(selectedModelCard.id)} disabled={Boolean(modelOperation) || planningBusy}>{modelOperation?.kind === "pull" && sameModelId(modelOperation.model, selectedModelCard.id) ? "Downloading…" : "Download current model"}</button><span className="current-model-fit__note">Download the current model before testing it.</span></>}
+            <button className="text-action" type="button" onClick={() => setShowAllModels(true)}>Open full catalog</button>
+          </div>
+        </aside>
+      )}
+      <div className="model-catalog-heading" id="recommended-models"><div><p className="section-label">Recommended local models</p><h3>{memoryBudgetPending ? `Pending shortlist for ${effectiveMemoryBudget} GB` : `Best fit for ${hardwareProfileLabel}`} · 32K context</h3></div><p>Only models that comfortably fit this hardware profile and one 32K conversation appear here. Kairos shows at most four.</p></div>
+      {recommendedModelCards.length > 0 ? <div className="model-grid">{recommendedModelCards.map((setupModel) => renderModelCard(setupModel, "recommended"))}</div> : <p className="model-catalog-empty">No additional model is recommended for this exact plan. Your current model remains unchanged; adjust the plan or open the full catalog to inspect test-required variants.</p>}
+      <div className="model-catalog-disclosure">
+        <div><strong>Advanced catalog</strong><p>Potentially tight, specialist, unsupported, or test-required models stay out of the default shortlist.</p></div>
+        <button className="secondary-action" type="button" onClick={() => setShowAllModels((visible) => !visible)} aria-expanded={showAllModels} aria-controls="advanced-model-catalog">{showAllModels ? "Hide all models" : "Show all models"}</button>
+      </div>
+      {showAllModels && <div id="advanced-model-catalog">{advancedModelCards.length > 0 ? <div className="model-grid model-grid--advanced">{advancedModelCards.map((setupModel) => renderModelCard(setupModel, "advanced"))}</div> : <p className="model-catalog-empty">No additional catalog models are available for this setup.</p>}</div>}
+      {setupFeedback && <p className="settings-feedback">{setupFeedback}</p>}
+    </section>
+  );
+
   return (
     <main className={`app-shell ${expanded ? "is-expanded" : "is-compact"} view-${view}`}>
       <section className="control-plane">
@@ -2645,7 +2711,7 @@ export default function App() {
                 setView("chat");
                 setSurfaceMode("compact");
               } else {
-                setView("chat");
+                setView(expandedWorkspace(view));
                 setSurfaceMode("cockpit");
               }
             }} aria-label={expanded ? "Use compact chat" : "Expand Kairos"}>
@@ -2702,9 +2768,12 @@ export default function App() {
                 <p className="section-label">Kairos chat</p>
                 <h1>{expanded ? "Ask from the right context." : "What matters now?"}</h1>
               </div>
-              <StatusPill tone={activeProvider.external ? "warning" : "local"}>
-                {activeProvider.external ? "PREVIEW FIRST" : "LOCAL"}
-              </StatusPill>
+              <div className="chat-heading__actions">
+                <StatusPill tone={activeProvider.external ? "warning" : "local"}>
+                  {activeProvider.external ? "PREVIEW FIRST" : "LOCAL"}
+                </StatusPill>
+                <button className="text-action chat-history-trigger" type="button" onClick={toggleHistory} aria-expanded={historyOpen} aria-controls="chat-history">History</button>
+              </div>
             </div>
 
             {!status?.initialized && (
@@ -2721,9 +2790,9 @@ export default function App() {
               {expanded && chatSessionId && <button className="text-action" type="button" onClick={() => void deleteChatSession(chatSessionId)} disabled={busy}>Delete chat</button>}
             </div>
 
-            {expanded && historyOpen && chatSessions.length > 0 && (
-              <aside className="chat-history" aria-label="Local chat history">
-                {chatSessions.map((session) => <div key={session.id} className={`chat-history__item ${session.id === chatSessionId ? "is-active" : ""}`}><button type="button" onClick={() => void loadChatSession(session.id)}><strong>{session.title}</strong><small>{session.messageCount} messages · {shortDate(session.updatedAt)}</small></button>{session.id !== chatSessionId && <button type="button" className="text-action" onClick={() => void deleteChatSession(session.id)} aria-label={`Delete ${session.title}`}>×</button>}</div>)}
+            {expanded && historyOpen && (
+              <aside className="chat-history" id="chat-history" aria-label="Local chat history">
+                {chatSessions.length > 0 ? chatSessions.map((session) => <div key={session.id} className={`chat-history__item ${session.id === chatSessionId ? "is-active" : ""}`}><button type="button" onClick={() => void loadChatSession(session.id)}><strong>{session.title}</strong><small>{session.messageCount} messages · {shortDate(session.updatedAt)}</small></button>{session.id !== chatSessionId && <button type="button" className="text-action" onClick={() => void deleteChatSession(session.id)} aria-label={`Delete ${session.title}`}>×</button>}</div>) : <p className="chat-history__empty">No saved chats yet.</p>}
               </aside>
             )}
 
@@ -2761,6 +2830,7 @@ export default function App() {
                       {message.citations.map((citation) => <CitationChip key={citation.id} citation={citation} />)}
                     </div>
                   ) : null}
+                  {message.specialistExecution && <SpecialistResponseIdentity identity={message.specialistExecution.identity} />}
                 </article>
               ))}
               {streamingAssistant && (
@@ -2919,7 +2989,7 @@ export default function App() {
                 <button className="primary-action" onClick={() => void runPulse()} disabled={busy || (!activeProvider.external && !modelReady)}>
                   {busy ? "Composing…" : activeProvider.external ? "Review cloud pulse" : "Compose pulse"}
                 </button>
-                <button className="icon-button" type="button" onClick={() => setView("chat")} aria-label="Back to cockpit">×</button>
+                <button className="icon-button" type="button" onClick={() => setView("atlas")} aria-label="Back to Atlas">×</button>
               </div>
             </div>
 
@@ -3102,29 +3172,15 @@ export default function App() {
             <div className="surface-heading">
               <div>
                 <p className="section-label">Local AI Lab</p>
-                <h1>Learn what your Mac can run.</h1>
-                <p>Local inference stays the default. Kairos never downloads, switches, or falls back without an explicit action.</p>
+                <h1>Build specialists from recorded evidence.</h1>
+                <p>Inspect real local manifests, runs, comparisons, and releases. Missing state stays missing; activation and model changes always require an explicit action.</p>
               </div>
               <div className="surface-heading__actions">
                 <StatusPill tone={ollamaRunning ? "success" : "warning"}>{ollamaRunning ? "OLLAMA READY" : ollamaInstalled ? "START OLLAMA" : "INSTALL OLLAMA"}</StatusPill>
-                <button className="secondary-action" type="button" onClick={() => void refreshStatus()}>Refresh</button>
+                <button className="secondary-action" type="button" onClick={() => void refreshStatus()}>Refresh runtime</button>
               </div>
             </div>
-            <div className="lab-health-grid">
-              <article className="lab-fact"><span>Hardware</span><strong>{hardwareProfileLabel}</strong><small>{primaryFitLimitGb ? `${primaryFitLimitGb} GB primary fit limit` : "Detecting primary fit limit"}</small></article>
-              <article className="lab-fact"><span>Memory preference</span><strong>{effectiveMemoryBudget ? `${effectiveMemoryBudget} GB cap` : "Auto"}</strong><small>{localSetup?.memoryBudgetPlanningOnly ? "Planning cap only · no allocation change" : "Planning cap"}</small></article>
-              <article className="lab-fact"><span>Context target</span><strong>{(localSetup?.contextWindowTokens ?? 32_768) / 1024}K</strong><small>Never lowered silently</small></article>
-              <article className="lab-fact"><span>Available disk</span><strong>{availableDiskGb ? `${availableDiskGb} GB` : "Unknown"}</strong><small>Model package space</small></article>
-            </div>
-            {!ollamaInstalled && <div className="inline-banner inline-banner--warning"><div><strong>Ollama is not installed.</strong><span>Install the official macOS app, then return here to inspect models.</span></div><button className="primary-action" type="button" onClick={() => void openOllamaInstall()}>Install Ollama</button></div>}
-            {ollamaInstalled && !ollamaRunning && <div className="inline-banner inline-banner--warning"><div><strong>Ollama is installed but not running.</strong><span>Open Ollama, then refresh Kairos. No model will be substituted.</span></div><button className="secondary-action" type="button" onClick={() => void refreshStatus()}>Check again</button></div>}
-            <section className="lab-section" id="lab-recommended-models">
-              <div className="settings-card__heading"><div><p className="section-label">Manager shortlist</p><h2>Three focused local roles</h2></div><span className="metadata-label">32K fit · exact tags</span></div>
-              {recommendedModelCards.length > 0 ? <div className="model-grid">{recommendedModelCards.map((setupModel) => renderModelCard(setupModel, "recommended"))}</div> : <p className="model-catalog-empty">No model is comfortable for this exact hardware and 32K plan. Open the full catalog to inspect test-required variants; Kairos keeps your current model unchanged.</p>}
-            </section>
-            {selectedModelCard && <section className="lab-section lab-current-model"><div className="settings-card__heading"><div><p className="section-label">Current selection</p><h2>{selectedModelCard.label ?? selectedModelCard.id}</h2></div><StatusPill tone={modelFitTone(selectedModelCard.fit)}>{selectedModelCard.installed ? "SELECTED" : "NOT INSTALLED"}</StatusPill></div><p><code>{selectedModelCard.id}</code> · {currentModelFit?.message ?? "Fit is being assessed."}</p><div className="current-model-fit__actions"><button className="text-action" type="button" onClick={() => void handleTestModel(selectedModelCard.id)} disabled={!selectedModelCard.installed || Boolean(modelOperation) || planningBusy}>Test current at 32K</button><button className="secondary-action" type="button" onClick={() => setShowAllModels(true)}>Open full catalog</button></div></section>}
-            <section className="lab-section benchmark-card"><div><p className="section-label">Benchmark</p><h2>Compare before retiring Qwen3</h2><p>Run the same 32K prompt and retrieval pack against installed <code>qwen3:8b</code> and LFM2.5. Kairos records load time, first token, total latency, tokens per second, context loaded, memory pressure, routing, citations, tool calls, and structured output without storing private prompts.</p></div><div className="benchmark-card__actions"><StatusPill tone="neutral">EXPLICIT RUN</StatusPill><button className="secondary-action" type="button" onClick={() => void runLocalBenchmark("lfm2.5:8b-a1b-q4_K_M")}>Test LFM2.5 at 32K</button><button className="text-action" type="button" onClick={() => void runLocalBenchmark("qwen3:8b")}>Test Qwen3 8B</button></div></section>
-            <section className="lab-section"><div className="settings-card__heading"><div><p className="section-label">Advanced catalog</p><h2>Installed and experimental models</h2></div><button className="secondary-action" type="button" onClick={() => setShowAllModels((visible) => !visible)}>{showAllModels ? "Hide catalog" : "Show all models"}</button></div>{showAllModels && <div className="model-grid model-grid--advanced">{advancedModelCards.map((setupModel) => renderModelCard(setupModel, "advanced"))}</div>}</section>
+            <SpecialistFoundry nativeAvailable={nativeRuntime} runtimeSetup={localModelSetup} />
           </section>
         )}
 
@@ -3138,73 +3194,16 @@ export default function App() {
               </div>
               <div className="surface-heading__actions">
                 <button className="secondary-action" onClick={() => void refreshStatus()}>Refresh status</button>
-                <button className="icon-button" type="button" onClick={() => setView("chat")} aria-label="Back to cockpit">×</button>
+                <button className="icon-button" type="button" onClick={() => setView("atlas")} aria-label="Back to Atlas">×</button>
               </div>
             </div>
 
-            <section className="settings-card local-setup-card">
+            <section className="settings-card settings-lab-link">
               <div className="settings-card__heading">
-                <div><p className="section-label">Local AI setup</p><h2>{setupState.title}</h2><p>{setupState.detail}</p></div>
-                <StatusPill tone={setupState.tone}>{ollamaRunning ? "OLLAMA" : "SETUP"}</StatusPill>
+                <div><p className="section-label">Local AI</p><h2>{setupState.title}</h2><p>Ollama, hardware planning, model downloads, and 32K tests now live in Local AI Lab.</p></div>
+                <StatusPill tone={setupState.tone}>{ollamaRunning ? "READY" : "SETUP"}</StatusPill>
               </div>
-              <div className="hardware-grid">
-                <div><span>{primaryFitLimitLabel}</span><strong>{primaryFitLimitGb ? `${primaryFitLimitGb} GB` : "Detecting…"}</strong><small>{hardwareProfileLabel}{hardwarePlanningOverride ? " · Manual planning override." : " · Auto-detected."}</small></div>
-                <div><span>Free disk</span><strong>{availableDiskGb ? `${availableDiskGb} GB` : "Detecting…"}</strong><small>Download packages are stored by Ollama.</small></div>
-                <div><span>Recommendation context</span><strong>32K</strong><small>Fit and tests stay at 32K; Kairos never lowers it silently.</small></div>
-              </div>
-              <div className="memory-setup-row">
-                <div className="memory-controls">
-                  <label className="hardware-profile-control"><span>Hardware profile</span><select value={hardwareProfile} disabled={planningBusy} onChange={(event) => void applyHardwareProfile(event.target.value as HardwareProfile)}>
-                    <option value="auto">Auto ({hardwareProfileLabel})</option>
-                    <optgroup label="Manual planning override">
-                      <option value="apple_unified">Apple unified memory</option>
-                      <option value="nvidia_vram">NVIDIA VRAM</option>
-                      <option value="cpu_only">CPU-only</option>
-                    </optgroup>
-                  </select></label>
-                  <label className="memory-budget-control"><span>Memory budget</span><select value={String(memoryBudget)} disabled={planningBusy} onChange={(event) => {
-                    const nextBudget = (event.target.value === "auto" || event.target.value === "custom" ? event.target.value : Number(event.target.value)) as MemoryBudget;
-                    setMemoryBudget(nextBudget);
-                    if (nextBudget !== "custom") void applyMemoryBudget(nextBudget);
-                  }}>
-                    <option value="auto">{primaryFitLimitGb ? `Auto (${primaryFitLimitGb} GB fit limit)` : "Auto (detect hardware)"}</option>
-                    {[16, 24, 32, 48, 64, 96, 192].map((amount) => <option key={amount} value={amount}>{amount} GB</option>)}
-                    <option value="custom">Custom</option>
-                  </select></label>
-                  {memoryBudget === "custom" && <label className="custom-memory-budget-control"><span>Custom budget (GB)</span><input type="number" min="1" max="192" value={customMemoryBudget} disabled={planningBusy} onChange={(event) => setCustomMemoryBudget(event.target.value)} /></label>}
-                  <div className="memory-budget-copy">
-                    <strong>{effectiveMemoryBudget} GB preference cap</strong>
-                    <p>{localSetup?.memoryBudgetMessage ?? "This is a planning preference, not a claim about installed hardware. Changing it re-ranks guidance only; Kairos does not change your model or context automatically."}</p>
-                    <p>Fit uses {primaryFitLimitLabel.toLowerCase()}{primaryFitLimitGb ? ` (${primaryFitLimitGb} GB)` : ""} for one 32K conversation.</p>
-                    {memoryBudgetPending && <span className="memory-plan-pending">Pending apply — the shortlist below still reflects your saved budget.</span>}
-                    {memoryBudget === "custom" && <button className="text-action" type="button" onClick={() => void applyMemoryBudget("custom")} disabled={planningBusy}>Apply custom budget</button>}
-                  </div>
-                </div>
-                <aside className={`ollama-health ${ollamaRunning ? "is-running" : "is-warning"}`} aria-label="Ollama setup health">
-                  <div className="ollama-health__heading"><div><p className="section-label">Ollama</p><h3>{!ollamaInstalled ? "Not installed" : ollamaRunning ? "Running locally" : "Installed, not running"}</h3></div><StatusPill tone={ollamaRunning ? "success" : "warning"}>{ollamaRunning ? "READY" : "SETUP"}</StatusPill></div>
-                  <p>{ollamaRunning ? `${localSetup?.endpoint ?? "http://localhost:11434"} · ${status?.model.installedModels.length ?? 0} installed model${(status?.model.installedModels.length ?? 0) === 1 ? "" : "s"}` : localSetup?.setupMessage ?? "Check the local Ollama service before using a local model."}</p>
-                  {!ollamaInstalled ? <button className="primary-action" type="button" onClick={() => void openOllamaInstall()}>{localSetup?.ollamaInstallAction?.label ?? "Install Ollama"}</button> : <button className="secondary-action" type="button" onClick={() => void refreshStatus()}>Refresh status</button>}
-                </aside>
-              </div>
-              {selectedModelCard && (
-                <aside className={`memory-fit current-model-fit memory-fit--${currentModelFit?.fit ?? "unknown"}`}>
-                  <div><StatusPill tone={modelFitTone(currentModelFit)}>{modelFitLabel(currentModelFit).toUpperCase()}</StatusPill><strong>Current model · <code>{selectedModelCard.id}</code> · 32K</strong></div>
-                  {currentModelFit?.fit === "not_recommended" ? <p><strong>Current model is not recommended for {primaryFitLimitLabel} {primaryFitLimitGb ? `${primaryFitLimitGb} GB` : "at the detected limit"} at 32K context.</strong> {currentModelFit.message}</p> : <p>{currentModelFit?.message ?? "Kairos keeps your current model visible and will never switch it automatically."}</p>}
-                  <div className="current-model-fit__actions">
-                    <button className="secondary-action" type="button" onClick={scrollToRecommendations} disabled={recommendedModelCards.length === 0}>Choose a recommended model</button>
-                    {selectedModelCard.installed ? <button className="text-action" type="button" onClick={() => void handleTestModel(selectedModelCard.id)} disabled={Boolean(modelOperation) || planningBusy}>{modelOperation?.kind === "test" && sameModelId(modelOperation.model, selectedModelCard.id) ? "Testing…" : "Test current at 32K"}</button> : <><button className="text-action" type="button" onClick={() => void handlePullModel(selectedModelCard.id)} disabled={Boolean(modelOperation) || planningBusy}>{modelOperation?.kind === "pull" && sameModelId(modelOperation.model, selectedModelCard.id) ? "Downloading…" : "Download current model"}</button><span className="current-model-fit__note">Download the current model before testing it.</span></>}
-                    <button className="text-action" type="button" onClick={() => setShowAllModels(true)}>Open full catalog</button>
-                  </div>
-                </aside>
-              )}
-              <div className="model-catalog-heading" id="recommended-models"><div><p className="section-label">Recommended local models</p><h3>{memoryBudgetPending ? `Pending shortlist for ${effectiveMemoryBudget} GB` : `Best fit for ${hardwareProfileLabel}`} · 32K context</h3></div><p>Only models that comfortably fit this hardware profile and one 32K conversation appear here. Kairos shows at most four.</p></div>
-              {recommendedModelCards.length > 0 ? <div className="model-grid">{recommendedModelCards.map((setupModel) => renderModelCard(setupModel, "recommended"))}</div> : <p className="model-catalog-empty">No additional model is recommended for this exact plan. Your current model remains unchanged; adjust the plan or open the full catalog to inspect test-required options.</p>}
-              <div className="model-catalog-disclosure">
-                <div><strong>Advanced catalog</strong><p>Potentially tight, specialist, unsupported, or test-required models stay out of the default shortlist.</p></div>
-                <button className="secondary-action" type="button" onClick={() => setShowAllModels((visible) => !visible)} aria-expanded={showAllModels} aria-controls="advanced-model-catalog">{showAllModels ? "Hide all models" : "Show all models"}</button>
-              </div>
-              {showAllModels && <div id="advanced-model-catalog">{advancedModelCards.length > 0 ? <div className="model-grid model-grid--advanced">{advancedModelCards.map((setupModel) => renderModelCard(setupModel, "advanced"))}</div> : <p className="model-catalog-empty">No additional catalog models are available for this setup.</p>}</div>}
-              {setupFeedback && <p className="settings-feedback">{setupFeedback}</p>}
+              <button className="secondary-action" type="button" onClick={() => showView("lab")}>Open Local AI Lab</button>
             </section>
 
             <section className="settings-grid">
