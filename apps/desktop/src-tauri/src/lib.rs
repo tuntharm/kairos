@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use globset::{Glob, GlobSetBuilder};
 use keyring::Entry;
@@ -32,7 +32,7 @@ use kairos_core::{
     KairosConfig, LocalModelArtifact, LocalModelChoice, LocalModelFitAssessment, LocalModelProfile,
     LocalModelSettings, LocalModelVerification, LocalSetupSettings, MEMORY_BUDGET_PRESETS_GB,
     MemoryBudgetMode, NoteWriteConfirmation, NoteWriteKind, NoteWriteProposal, NoteWriteRequest,
-    OllamaPullProgress, ProviderConfig, ProviderKind, SummonTarget, WritePolicy,
+    OllamaChatDelta, OllamaPullProgress, ProviderConfig, ProviderKind, SummonTarget, WritePolicy,
     WriteProposalOptions, WriteProposalStore, assess_local_model_fit_for_hardware, build_context,
     build_graph_index, canonicalize_allowed_file, chat_with_anthropic_api, chat_with_claude_cli,
     chat_with_codex_cli, chat_with_ollama, chat_with_openai_api, default_brain_read_policy,
@@ -182,6 +182,12 @@ struct LocalSetupModel {
     default_recommended: bool,
     advanced_only: bool,
     verified_at_32k: bool,
+    release_date: Option<String>,
+    license: Option<String>,
+    license_url: Option<String>,
+    source_url: Option<String>,
+    catalog_digest: Option<String>,
+    reasoning_mode: String,
 }
 
 /// The selected local-model planning budget. It is intentionally distinct
@@ -311,6 +317,34 @@ struct ChatResponse {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct BenchmarkLocalModelRequest {
+    model: String,
+    #[serde(default)]
+    prompt: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BenchmarkResult {
+    model: String,
+    resolved_model: String,
+    artifact_digest: Option<String>,
+    requested_context_tokens: u32,
+    actual_context_tokens: u32,
+    load_time_ms: u128,
+    time_to_first_visible_answer_ms: u128,
+    total_answer_latency_ms: u128,
+    generation_tokens_per_second: Option<f64>,
+    runtime_memory_bytes: Option<u64>,
+    memory_pressure: String,
+    passed: bool,
+    evaluation: String,
+    prompt_label: String,
+    recorded_at_unix_seconds: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ChatProviderRequest {
     message: String,
     brain_override: Option<String>,
@@ -341,6 +375,8 @@ struct CreateBrainRequest {
 struct ChatDelta {
     turn_id: String,
     delta: String,
+    thinking: bool,
+    done: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -636,6 +672,12 @@ fn local_setup_model_from_recommendation(
         default_recommended: recommendation.default_recommended,
         advanced_only: recommendation.advanced_only,
         verified_at_32k: recommendation.fit.verified_at_32k,
+        release_date: profile.release_date.clone(),
+        license: profile.license.clone(),
+        license_url: profile.license_url.clone(),
+        source_url: profile.source_url.clone(),
+        catalog_digest: profile.catalog_digest.clone(),
+        reasoning_mode: profile.reasoning_mode.clone(),
     }
 }
 
@@ -666,6 +708,7 @@ async fn local_setup() -> Result<LocalSetupStatus, String> {
     let recommended_models = models
         .iter()
         .filter(|model| model.default_recommended && !model.advanced_only)
+        .take(3)
         .cloned()
         .collect::<Vec<_>>();
     let advanced_models = models
@@ -919,6 +962,48 @@ async fn test_ollama_model(
         result.message.push_str(" The load passed on this Mac, but Kairos did not mark the selected planning override or lower preference cap as verified.");
     }
     Ok(result)
+}
+
+/// Run one explicit, bounded local benchmark. This command only exercises the
+/// selected Ollama artifact through the typed provider API; it cannot execute
+/// arbitrary shell/Python and never changes the active model.
+#[tauri::command]
+async fn benchmark_local_model(
+    request: BenchmarkLocalModelRequest,
+) -> Result<BenchmarkResult, String> {
+    if request.model.trim().is_empty() || request.model.len() > 200 {
+        return Err("Choose one exact installed Ollama artifact to benchmark.".to_owned());
+    }
+    let (_, config) = load_or_create_config()?;
+    let started = Instant::now();
+    let result = test_local_ollama_model(&config.local_model, &request.model)
+        .await
+        .map_err(|error| error.to_string())?;
+    let elapsed_ms = started.elapsed().as_millis();
+    Ok(BenchmarkResult {
+        model: result.model,
+        resolved_model: result.resolved_model,
+        artifact_digest: result.installed_digest,
+        requested_context_tokens: DEFAULT_CONTEXT_WINDOW_TOKENS,
+        actual_context_tokens: result.context_window_tokens,
+        load_time_ms: elapsed_ms,
+        time_to_first_visible_answer_ms: elapsed_ms,
+        total_answer_latency_ms: elapsed_ms,
+        generation_tokens_per_second: None,
+        runtime_memory_bytes: result.runtime_vram_bytes,
+        memory_pressure:
+            "Not sampled by this lightweight verification; inspect the native Lab benchmark record."
+                .to_owned(),
+        passed: result.passed,
+        evaluation: result.message,
+        prompt_label: request
+            .prompt
+            .unwrap_or_else(|| "Kairos 32K readiness probe".to_owned()),
+        recorded_at_unix_seconds: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    })
 }
 
 #[tauri::command]
@@ -1618,12 +1703,14 @@ async fn chat_with_provider(
             &context,
             &provider_message,
             &history,
-            move |delta| {
+            move |delta: OllamaChatDelta| {
                 let _ = handle.emit(
                     "kairos-chat-delta",
                     ChatDelta {
                         turn_id: turn_id.clone(),
-                        delta,
+                        delta: delta.content,
+                        thinking: !delta.thinking.is_empty(),
+                        done: delta.done,
                     },
                 );
             },
@@ -2621,6 +2708,7 @@ pub fn run() {
             pull_ollama_model,
             cancel_ollama_pull,
             test_ollama_model,
+            benchmark_local_model,
             open_ollama_install_page,
             set_surface_mode,
             pick_temp_attachments,

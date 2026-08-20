@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::process::Command;
 use tokio::time::timeout;
 
@@ -69,6 +69,18 @@ pub struct OllamaModelTest {
     pub message: String,
 }
 
+/// A typed delta from Ollama's streaming API. Thinking is deliberately kept
+/// separate from visible content so the desktop UI can show a simple status
+/// without persisting or rendering raw reasoning traces.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OllamaChatDelta {
+    pub thinking: String,
+    pub content: String,
+    pub done: bool,
+    pub tool_calls: Option<Value>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OllamaStatus {
@@ -126,9 +138,14 @@ struct OllamaResponse {
     message: OllamaMessage,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct OllamaMessage {
+    #[serde(default)]
     content: String,
+    #[serde(default)]
+    thinking: String,
+    #[serde(default)]
+    tool_calls: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -316,20 +333,23 @@ impl OllamaProvider {
         let model = status.resolved_model.ok_or_else(|| {
             CoreError::Ollama("selected local Ollama model could not be resolved".to_owned())
         })?;
-        let payload = json!({
-            "model": model,
-            "stream": false,
-            "keep_alive": "10m",
-            "format": answer_schema(),
-            "options": {
-                "temperature": 0,
-                "num_ctx": self.settings.context_window_tokens
-            },
-            "messages": [
-                {"role": "system", "content": output_contract()},
-                {"role": "user", "content": model_prompt(pack)}
-            ]
-        });
+        let payload = with_thinking_mode(
+            json!({
+                "model": model,
+                "stream": false,
+                "keep_alive": "10m",
+                "format": answer_schema(),
+                "options": {
+                    "temperature": 0,
+                    "num_ctx": self.settings.context_window_tokens
+                },
+                "messages": [
+                    {"role": "system", "content": output_contract()},
+                    {"role": "user", "content": model_prompt(pack)}
+                ]
+            }),
+            &model,
+        );
         let response = ollama_client(Duration::from_secs(180))
             .post(endpoint_url(&self.settings, OLLAMA_CHAT_PATH)?)
             .json(&payload)
@@ -551,9 +571,8 @@ pub async fn test_ollama_model(
         .installed_model_sizes
         .iter()
         .find(|installed| same_ollama_model(&installed.id, &resolved_model));
-    let response = ollama_client(Duration::from_secs(90))
-        .post(endpoint_url(&test_settings, OLLAMA_CHAT_PATH)?)
-        .json(&json!({
+    let payload = with_thinking_mode(
+        json!({
             "model": resolved_model,
             "stream": false,
             "keep_alive": "5m",
@@ -563,7 +582,12 @@ pub async fn test_ollama_model(
                 "num_predict": 12
             },
             "messages": [{"role": "user", "content": "Reply with the word READY."}]
-        }))
+        }),
+        &resolved_model,
+    );
+    let response = ollama_client(Duration::from_secs(90))
+        .post(endpoint_url(&test_settings, OLLAMA_CHAT_PATH)?)
+        .json(&payload)
         .send()
         .await
         .map_err(|error| CoreError::Ollama(format!("local model test failed: {error}")))?
@@ -682,19 +706,30 @@ fn parse_pull_progress(line: &str) -> Result<OllamaPullProgress> {
     })
 }
 
-fn parse_ollama_chat_stream_line(line: &str) -> Result<(String, bool)> {
+fn with_thinking_mode(mut payload: Value, model: &str) -> Value {
+    let model = model.to_ascii_lowercase();
+    if model.starts_with("lfm2.5") || model.starts_with("qwen3") || model.starts_with("deepseek") {
+        payload["think"] = Value::Bool(true);
+    } else if model.starts_with("gpt-oss") {
+        payload["think"] = Value::String("medium".to_owned());
+    }
+    payload
+}
+
+fn parse_ollama_chat_stream_line(line: &str) -> Result<OllamaChatDelta> {
     let wire: OllamaChatStreamWire = serde_json::from_str(line).map_err(|_| {
         CoreError::Ollama("Ollama returned unreadable local chat stream data.".to_owned())
     })?;
     if let Some(error) = wire.error {
         return Err(CoreError::Ollama(error));
     }
-    Ok((
-        wire.message
-            .map(|message| message.content)
-            .unwrap_or_default(),
-        wire.done,
-    ))
+    let message = wire.message.unwrap_or_default();
+    Ok(OllamaChatDelta {
+        thinking: message.thinking,
+        content: message.content,
+        done: wire.done,
+        tool_calls: message.tool_calls,
+    })
 }
 
 /// Ask the selected local model a general Kairos question. The context pack
@@ -716,19 +751,22 @@ pub async fn chat_with_ollama(
         CoreError::Ollama("selected local Ollama model could not be resolved".to_owned())
     })?;
     let prompt = render_chat_prompt(pack, message, history);
-    let payload = json!({
-        "model": model,
-        "stream": false,
-        "keep_alive": "10m",
-        "options": {
-            "temperature": 0.2,
-            "num_ctx": settings.context_window_tokens
-        },
-        "messages": [
-            {"role": "system", "content": chat_contract()},
-            {"role": "user", "content": prompt}
-        ]
-    });
+    let payload = with_thinking_mode(
+        json!({
+            "model": model,
+            "stream": false,
+            "keep_alive": "10m",
+            "options": {
+                "temperature": 0.2,
+                "num_ctx": settings.context_window_tokens
+            },
+            "messages": [
+                {"role": "system", "content": chat_contract()},
+                {"role": "user", "content": prompt}
+            ]
+        }),
+        &model,
+    );
     let response = ollama_client(Duration::from_secs(300))
         .post(endpoint_url(settings, OLLAMA_CHAT_PATH)?)
         .json(&payload)
@@ -755,7 +793,7 @@ pub async fn stream_chat_with_ollama<F>(
     mut on_delta: F,
 ) -> Result<ChatAnswer>
 where
-    F: FnMut(String),
+    F: FnMut(OllamaChatDelta),
 {
     let provider = OllamaProvider::new(settings.clone());
     let status = provider.status().await;
@@ -768,9 +806,8 @@ where
         CoreError::Ollama("selected local Ollama model could not be resolved".to_owned())
     })?;
     let prompt = render_chat_prompt(pack, message, history);
-    let response = ollama_client(Duration::from_secs(300))
-        .post(endpoint_url(settings, OLLAMA_CHAT_PATH)?)
-        .json(&json!({
+    let payload = with_thinking_mode(
+        json!({
             "model": model,
             "stream": true,
             "keep_alive": "10m",
@@ -783,7 +820,12 @@ where
                 {"role": "system", "content": chat_contract()},
                 {"role": "user", "content": prompt}
             ]
-        }))
+        }),
+        &model,
+    );
+    let response = ollama_client(Duration::from_secs(300))
+        .post(endpoint_url(settings, OLLAMA_CHAT_PATH)?)
+        .json(&payload)
         .send()
         .await
         .map_err(|error| CoreError::Ollama(error.to_string()))?
@@ -805,21 +847,25 @@ where
             if line.is_empty() {
                 continue;
             }
-            let (delta, completed) = parse_ollama_chat_stream_line(&line)?;
-            if !delta.is_empty() {
-                content.push_str(&delta);
-                on_delta(delta);
+            let delta = parse_ollama_chat_stream_line(&line)?;
+            if !delta.thinking.is_empty() || !delta.content.is_empty() || delta.done {
+                if !delta.content.is_empty() {
+                    content.push_str(&delta.content);
+                }
+                on_delta(delta.clone());
             }
-            done |= completed;
+            done |= delta.done;
         }
     }
     if !pending.trim().is_empty() {
-        let (delta, completed) = parse_ollama_chat_stream_line(pending.trim())?;
-        if !delta.is_empty() {
-            content.push_str(&delta);
-            on_delta(delta);
+        let delta = parse_ollama_chat_stream_line(pending.trim())?;
+        if !delta.thinking.is_empty() || !delta.content.is_empty() || delta.done {
+            if !delta.content.is_empty() {
+                content.push_str(&delta.content);
+            }
+            on_delta(delta.clone());
         }
-        done |= completed;
+        done |= delta.done;
     }
     if !done {
         return Err(CoreError::Ollama(
@@ -1234,12 +1280,19 @@ mod tests {
 
     #[test]
     fn chat_stream_parser_keeps_deltas_and_surfaces_provider_errors() {
-        let (delta, done) = parse_ollama_chat_stream_line(
+        let delta = parse_ollama_chat_stream_line(
             r#"{"message":{"role":"assistant","content":"Hello"},"done":false}"#,
         )
         .unwrap();
-        assert_eq!(delta, "Hello");
-        assert!(!done);
+        assert_eq!(delta.content, "Hello");
+        assert!(delta.thinking.is_empty());
+        assert!(!delta.done);
+        let thinking = parse_ollama_chat_stream_line(
+            r#"{"message":{"role":"assistant","thinking":"step"},"done":false}"#,
+        )
+        .unwrap();
+        assert_eq!(thinking.thinking, "step");
+        assert!(thinking.content.is_empty());
         assert!(parse_ollama_chat_stream_line(r#"{"error":"out of memory"}"#).is_err());
     }
 

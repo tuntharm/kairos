@@ -110,6 +110,7 @@ type LocalSetupModel = {
   id: string;
   label?: string;
   role?: string;
+  managerRole?: ManagerModelRole;
   installed?: boolean;
   downloadSize?: string;
   memoryBand?: string;
@@ -122,6 +123,12 @@ type LocalSetupModel = {
   defaultRecommended?: boolean;
   advancedOnly?: boolean;
   verifiedAt32k?: boolean;
+  releaseDate?: string;
+  license?: string;
+  licenseUrl?: string;
+  sourceUrl?: string;
+  catalogDigest?: string;
+  reasoningMode?: ModelReasoningMode | string;
 };
 
 type OllamaInstallAction = {
@@ -201,6 +208,12 @@ type GraphNode = {
 
 type GraphEdge = { id?: string; source: string; target: string; kind?: string };
 
+const atlasEdgeKinds = new Set(["wiki_link", "markdown_link", "embed", "cross_brain_bridge", "bridge"]);
+
+function isAtlasVisibleEdge(edge: GraphEdge) {
+  return atlasEdgeKinds.has(edge.kind?.toLowerCase() ?? "");
+}
+
 type GraphSnapshot = {
   nodes: GraphNode[];
   edges: GraphEdge[];
@@ -237,6 +250,7 @@ type StreamingAssistant = {
   turnId: string;
   body: string;
   createdAt: string;
+  thinking: boolean;
 };
 
 type ChatPreview = {
@@ -283,8 +297,11 @@ type StoredChatSession = ChatSessionSummary & {
 };
 
 type ProviderId = "ollama" | "openai" | "anthropic" | "codex-cli" | "claude-cli";
-type ViewId = "chat" | "next" | "map" | "settings";
-type NavId = "history" | "next" | "settings";
+type WorkspaceId = "atlas" | "next" | "lab" | "settings";
+type ManagerModelRole = "fast" | "general" | "premium";
+type ModelReasoningMode = "none" | "optional" | "required";
+type ViewId = "chat" | WorkspaceId;
+type NavId = "atlas" | "next" | "lab" | "settings";
 type SurfaceMode = "compact" | "cockpit";
 type SettingsAnchor = "top" | "brains" | "privacy" | "writes";
 type MemoryBudget = "auto" | "custom" | 16 | 24 | 32 | 48 | 64 | 96 | 192;
@@ -293,15 +310,17 @@ type ScopedExecutionGrant = { token: string; brainId: string; providerId: Provid
 type GraphCamera = { scale: number; x: number; y: number };
 type GraphPosition = { x: number; y: number };
 type ManualGraphPositions = Record<string, GraphPosition>;
+type AtlasLayoutV2 = { version: 2; positions: ManualGraphPositions; savedAt?: string };
 
 type BrainVisual = { label: string; color: string; icon: string };
 
 const briefQuestion = "What should I do next, and why?";
 const ollamaInstallUrl = "https://ollama.com/download/mac";
 const graphCameraFit: GraphCamera = { scale: 1, x: 0, y: 0 };
-const graphZoomMin = 0.6;
+const graphZoomMin = 0.35;
+const graphFitScaleMin = 0.12;
 const graphZoomMax = 3;
-const graphManualLayoutStorageKey = "kairos.graph-manual-layout.v1";
+const graphManualLayoutStorageKey = "kairos.graph-manual-layout.v2";
 const maxLiveAtlasPhysicsNodes = 500;
 
 const browserPreviewStatus: AppStatus = {
@@ -318,6 +337,8 @@ const browserPreviewStatus: AppStatus = {
     choices: [
       { id: "qwen3.6:35b-mlx", label: "Qwen 3.6 35B MLX", role: "Default local model" },
       { id: "qwen3:8b", label: "Qwen 3 8B", role: "Fast router" },
+      { id: "lfm2.5:8b-a1b-q4_K_M", label: "LFM2.5 8B A1B", role: "Fast local router" },
+      { id: "gemma4:12b-mlx", label: "Gemma 4 12B MLX", role: "Balanced multimodal assistant" },
       { id: "gpt-oss:20b", label: "GPT-OSS 20B", role: "Optional alternative" },
       { id: "glm-4.7-flash", label: "GLM 4.7 Flash", role: "Optional alternative" },
     ],
@@ -344,6 +365,11 @@ const browserPreviewSetup: LocalSetupStatus = {
   effectiveMemoryBudgetGb: 48,
   memoryBudgetMessage: "Auto uses detected unified memory as a planning budget. It does not change the model or context.",
   memoryBudgetPlanningOnly: true,
+  recommendedModels: [
+    { id: "lfm2.5:8b-a1b-q4_K_M", label: "LFM2.5 8B A1B", role: "Fast local router", installed: false, downloadSize: "~5.2 GB", recommendedContext: "32K target · 125K Ollama limit", capabilities: ["Text", "Reasoning", "Routing", "Tools"], fit: { fit: "recommended", budgetGb: 48, minimumMemoryGb: 12, recommendedMemoryGb: 16, contextWindowTokens: 32_768, maximumContextTokens: 125_000, contextCompatible: true, requiresTest: true, message: "Recommended — not yet verified on this Mac." }, defaultRecommended: true, recommendationRank: 1, releaseDate: "28 May 2026", license: "LFM Open License 1.0", licenseUrl: "https://www.liquid.ai/lfm-license", reasoningMode: "required" },
+    { id: "gemma4:12b-mlx", label: "Gemma 4 12B MLX", role: "Balanced multimodal assistant", installed: false, downloadSize: "~7.7 GB", recommendedContext: "32K target · 131K Ollama limit", capabilities: ["Text", "Vision", "Audio", "Documents", "Coding", "Tools"], fit: { fit: "recommended", budgetGb: 48, minimumMemoryGb: 20, recommendedMemoryGb: 24, contextWindowTokens: 32_768, maximumContextTokens: 131_072, contextCompatible: true, message: "Recommended for this 48 GB Apple unified memory plan." }, defaultRecommended: true, recommendationRank: 2, releaseDate: "3 Jun 2026", license: "Gemma Terms of Use", licenseUrl: "https://ai.google.dev/gemma/terms" },
+    { id: "qwen3.6:35b-mlx", label: "Qwen 3.6 35B MLX", role: "Premium local reasoning", installed: true, downloadSize: "~22 GB", recommendedContext: "32K target", capabilities: ["Text", "Vision", "Coding", "Reasoning"], fit: { fit: "recommended", budgetGb: 48, minimumMemoryGb: 40, recommendedMemoryGb: 48, contextWindowTokens: 32_768, maximumContextTokens: 262_144, contextCompatible: true, requiresTest: true, message: "Fits on paper; keep test status explicit until a real 32K load passes." }, defaultRecommended: true, recommendationRank: 3 },
+  ],
 };
 
 const fallbackGraph: GraphSnapshot = {
@@ -351,13 +377,56 @@ const fallbackGraph: GraphSnapshot = {
   edges: [],
 };
 
-const modelCatalog: Record<string, { label: string; role: string; downloadSize: string; memoryBand: string; context: string }> = {
+const modelCatalog: Record<string, {
+  label: string;
+  role: string;
+  downloadSize: string;
+  memoryBand: string;
+  context: string;
+  capabilities?: string[];
+  license?: string;
+  licenseUrl?: string;
+  sourceUrl?: string;
+  releaseDate?: string;
+  digest?: string;
+  reasoningMode?: string;
+}> = {
+  "lfm2.5:8b-a1b-q4_K_M": {
+    label: "LFM2.5 8B A1B",
+    role: "Fast local router",
+    downloadSize: "~5.2 GB",
+    memoryBand: "Light · 16 GB+",
+    context: "32K target · 125K Ollama limit",
+    capabilities: ["Text", "Reasoning", "Routing", "Tools"],
+    license: "LFM Open License 1.0",
+    licenseUrl: "https://www.liquid.ai/lfm-license",
+    sourceUrl: "https://ollama.com/library/lfm2.5/tags",
+    releaseDate: "28 May 2026",
+    digest: "9cf756159fc2",
+    reasoningMode: "required",
+  },
+  "gemma4:12b-mlx": {
+    label: "Gemma 4 12B MLX",
+    role: "Balanced multimodal assistant",
+    downloadSize: "~7.7 GB",
+    memoryBand: "Balanced · 24 GB+",
+    context: "32K target · 131K Ollama limit",
+    capabilities: ["Text", "Vision", "Audio", "Documents", "Coding", "Tools"],
+    license: "Gemma Terms of Use",
+    licenseUrl: "https://ai.google.dev/gemma/terms",
+    sourceUrl: "https://ollama.com/library/gemma4:12b-mlx",
+    releaseDate: "3 Jun 2026",
+    reasoningMode: "optional",
+  },
   "qwen3.6:35b-mlx": {
     label: "Qwen 3.6 35B MLX",
     role: "Starter default",
     downloadSize: "~22 GB",
     memoryBand: "Power · 48 GB+ recommended",
     context: "32K context target",
+    capabilities: ["Text", "Vision", "Coding", "Reasoning"],
+    sourceUrl: "https://ollama.com/library/qwen3.6:35b-mlx",
+    reasoningMode: "optional",
   },
   "qwen3:8b": {
     label: "Qwen 3 8B",
@@ -365,6 +434,7 @@ const modelCatalog: Record<string, { label: string; role: string; downloadSize: 
     downloadSize: "~5.2 GB",
     memoryBand: "Light · 16 GB+",
     context: "32K context target",
+    capabilities: ["Text", "Routing", "Summaries"],
   },
   "gpt-oss:20b": {
     label: "GPT-OSS 20B",
@@ -392,6 +462,13 @@ function normalizedModelId(model: string) {
 
 function sameModelId(left: string, right: string) {
   return normalizedModelId(left) === normalizedModelId(right);
+}
+
+function modelCatalogEntry(model: string) {
+  const direct = modelCatalog[model];
+  if (direct) return direct;
+  const key = Object.keys(modelCatalog).find((candidate) => sameModelId(candidate, model));
+  return key ? modelCatalog[key] : undefined;
 }
 
 function isInstalledModel(model: string, installedModels: string[]) {
@@ -587,15 +664,67 @@ function isKairosGraphNode(node: GraphNode) {
 }
 
 function clampGraphCoordinate(value: number) {
-  return Math.max(1, Math.min(99, value));
+  return Number.isFinite(value) ? value : 50;
+}
+
+function graphCameraForNodes(nodes: GraphNode[], width: number, height: number): GraphCamera {
+  if (width <= 1 || height <= 1 || nodes.length === 0) return graphCameraFit;
+  const positions = nodes.map((node) => ({
+    x: Number.isFinite(node.x) ? node.x! : 50,
+    y: Number.isFinite(node.y) ? node.y! : 50,
+  }));
+  const minX = Math.min(...positions.map((position) => position.x));
+  const maxX = Math.max(...positions.map((position) => position.x));
+  const minY = Math.min(...positions.map((position) => position.y));
+  const maxY = Math.max(...positions.map((position) => position.y));
+  const spanX = Math.max(12, maxX - minX);
+  const spanY = Math.max(12, maxY - minY);
+  const padding = 28;
+  const scale = Math.max(graphFitScaleMin, Math.min(graphZoomMax, Math.min(
+    (width - padding * 2) / ((spanX / 100) * width),
+    (height - padding * 2) / ((spanY / 100) * height),
+  )));
+  const centreX = ((minX + maxX) / 2 / 100) * width;
+  const centreY = ((minY + maxY) / 2 / 100) * height;
+  return {
+    scale,
+    x: width / 2 - centreX * scale,
+    y: height / 2 - centreY * scale,
+  };
+}
+
+function normalizeAtlasPositions(nodes: GraphNode[]) {
+  const positioned = nodes.filter((node) => !isKairosGraphNode(node) && Number.isFinite(node.x) && Number.isFinite(node.y));
+  if (positioned.length < 2) return nodes;
+  const minX = Math.min(...positioned.map((node) => node.x!));
+  const maxX = Math.max(...positioned.map((node) => node.x!));
+  const minY = Math.min(...positioned.map((node) => node.y!));
+  const maxY = Math.max(...positioned.map((node) => node.y!));
+  const spanX = Math.max(0.001, maxX - minX);
+  const spanY = Math.max(0.001, maxY - minY);
+  if (minX >= -12 && maxX <= 112 && minY >= -12 && maxY <= 112) return nodes;
+  const targetMin = 10;
+  const targetSpan = 80;
+  const scale = Math.min(targetSpan / spanX, targetSpan / spanY);
+  const offsetX = 50 - ((minX + maxX) / 2) * scale;
+  const offsetY = 50 - ((minY + maxY) / 2) * scale;
+  return nodes.map((node) => {
+    if (isKairosGraphNode(node) || !Number.isFinite(node.x) || !Number.isFinite(node.y)) return node;
+    return {
+      ...node,
+      x: Number((node.x! * scale + offsetX).toFixed(3)),
+      y: Number((node.y! * scale + offsetY).toFixed(3)),
+    };
+  });
 }
 
 function readManualGraphPositions(): ManualGraphPositions {
   if (typeof window === "undefined") return {};
   try {
     const stored = JSON.parse(window.localStorage.getItem(graphManualLayoutStorageKey) ?? "{}");
-    if (!stored || typeof stored !== "object" || Array.isArray(stored)) return {};
-    return Object.fromEntries(Object.entries(stored).flatMap(([nodeId, position]) => {
+    const layout = asRecord(stored);
+    if (!layout || layout.version !== 2 || !layout.positions || typeof layout.positions !== "object") return {};
+    return Object.fromEntries(Object.entries(layout.positions).flatMap(([nodeId, position]) => {
       const record = asRecord(position);
       if (!record || typeof record.x !== "number" || typeof record.y !== "number") return [];
       return [[nodeId, {
@@ -658,6 +787,7 @@ function layoutGraph(nodes: GraphNode[], edges: GraphEdge[]) {
   const nodeIndex = new Map(orderedNodes.map((node, index) => [node.id, index]));
   const edgePairs = edges
     .flatMap((edge) => {
+      if (!isAtlasVisibleEdge(edge)) return [];
       const source = nodeIndex.get(edge.source);
       const target = nodeIndex.get(edge.target);
       return source === undefined || target === undefined || source === target ? [] : [{ source, target, edge }];
@@ -705,10 +835,10 @@ function layoutGraph(nodes: GraphNode[], edges: GraphEdge[]) {
       const kind = edge.kind?.toLowerCase() ?? "";
       const sourceBrain = graphBrainKey(orderedNodes[source]);
       const targetBrain = graphBrainKey(orderedNodes[target]);
-      const explicitLink = ["wiki_link", "markdown_link", "embed"].includes(kind);
+      const explicitLink = isAtlasVisibleEdge(edge) && ["wiki_link", "markdown_link", "embed"].includes(kind);
       const crossBrain = explicitLink && sourceBrain !== targetBrain && sourceBrain !== "kairos" && targetBrain !== "kairos";
-      const desiredLength = kind === "owns" ? 27 : crossBrain ? 29 : kind === "contains" ? 10 : 15;
-      const strength = kind === "owns" ? 0.012 : crossBrain ? 0.006 : kind === "contains" ? 0.019 : 0.016;
+      const desiredLength = crossBrain ? 29 : 15;
+      const strength = crossBrain ? 0.006 : 0.016;
       const magnitude = (distance - desiredLength) * strength;
       const fx = (dx / distance) * magnitude;
       const fy = (dy / distance) * magnitude;
@@ -723,16 +853,12 @@ function layoutGraph(nodes: GraphNode[], edges: GraphEdge[]) {
       const anchorStrength = orderedNodes[index].kind === "brain" ? 0.05 : 0.028;
       if (!position.lockedX) {
         forceX[index] += (position.clusterX - position.x) * anchorStrength;
-        if (position.x < 8) forceX[index] += (8 - position.x) * 0.3;
-        if (position.x > 92) forceX[index] -= (position.x - 92) * 0.3;
         const cappedForce = Math.max(-1.25, Math.min(1.25, forceX[index]));
         position.vx = Math.max(-0.72, Math.min(0.72, (position.vx + cappedForce * temperature) * 0.7));
         position.x = clampGraphCoordinate(position.x + position.vx);
       }
       if (!position.lockedY) {
         forceY[index] += (position.clusterY - position.y) * anchorStrength;
-        if (position.y < 8) forceY[index] += (8 - position.y) * 0.3;
-        if (position.y > 92) forceY[index] -= (position.y - 92) * 0.3;
         const cappedForce = Math.max(-1.25, Math.min(1.25, forceY[index]));
         position.vy = Math.max(-0.72, Math.min(0.72, (position.vy + cappedForce * temperature) * 0.7));
         position.y = clampGraphCoordinate(position.y + position.vy);
@@ -784,7 +910,7 @@ function normalizeGraph(value: unknown): GraphSnapshot | null {
   });
   const needsLayout = nodes.some((node) => node.x === undefined || node.y === undefined);
   return nodes.length > 0 ? {
-    nodes: needsLayout ? layoutGraph(nodes, edges) : nodes,
+    nodes: normalizeAtlasPositions(needsLayout ? layoutGraph(nodes, edges) : nodes),
     edges,
     indexedAt: typeof record.indexedAt === "string" ? record.indexedAt : undefined,
     stale: Boolean(record.stale),
@@ -825,6 +951,16 @@ function StatusPill({ tone = "neutral", children }: { tone?: "neutral" | "succes
   return <span className={`status-pill status-pill--${tone}`}>{children}</span>;
 }
 
+function NavGlyph({ id }: { id: NavId }) {
+  const paths: Record<NavId, string> = {
+    atlas: "M4 4h5v5H4zM15 4h5v5h-5zM4 15h5v5H4zM15 15h5v5h-5zM9 6.5h6M6.5 9v6M17.5 9v6M9 17.5h6",
+    next: "M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.7 2.3L22 19l-2.3.7L19 22l-.7-2.3L16 19l2.3-.7z",
+    lab: "M9 3h6M10 3v5l-5 9.2A2 2 0 0 0 6.7 21h10.6a2 2 0 0 0 1.7-3.8L14 8V3M8 15h8",
+    settings: "M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7zm0-5v2m0 13v2m8.5-8.5h-2M5.5 12h-2m14.5-6.5-1.4 1.4M5.4 18.6 4 20m14.6 0-1.4-1.4M5.4 5.4 4 4",
+  };
+  return <svg className="nav-glyph" viewBox="0 0 24 24" aria-hidden="true"><path d={paths[id]} fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+}
+
 function RouteChips({ routes }: { routes?: Array<{ id: string; name: string }> }) {
   if (!routes?.length) return null;
   return (
@@ -840,6 +976,102 @@ function RouteChips({ routes }: { routes?: Array<{ id: string; name: string }> }
       })}
     </div>
   );
+}
+
+type AtlasCanvasProps = {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  positions: Record<string, GraphPosition>;
+  width: number;
+  height: number;
+  camera: GraphCamera;
+  selectedNode: string | null;
+  hoveredNode: string | null;
+  search: string;
+  degrees: Map<string, number>;
+  latestRouteIds: Set<string>;
+};
+
+function AtlasCanvas({ nodes, edges, positions, width, height, camera, selectedNode, hoveredNode, search, degrees, latestRouteIds }: AtlasCanvasProps) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || width <= 0 || height <= 0) return;
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = Math.max(1, Math.round(width * dpr));
+    canvas.height = Math.max(1, Math.round(height * dpr));
+    canvas.style.width = `${width}px`;
+    canvas.style.height = `${height}px`;
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    context.clearRect(0, 0, width, height);
+    const point = (node: GraphNode) => {
+      const position = positions[node.id] ?? { x: node.x ?? 50, y: node.y ?? 50 };
+      return {
+        x: camera.x + (position.x / 100) * width * camera.scale,
+        y: camera.y + (position.y / 100) * height * camera.scale,
+      };
+    };
+    const nodeById = new Map(nodes.map((node) => [node.id, node]));
+    const points = new Map(nodes.map((node) => [node.id, point(node)]));
+    edges.forEach((edge) => {
+      const source = points.get(edge.source);
+      const target = points.get(edge.target);
+      if (!source || !target) return;
+      const sourceNode = nodeById.get(edge.source);
+      const targetNode = nodeById.get(edge.target);
+      const crossBrain = Boolean(sourceNode && targetNode && sourceNode.brainId !== targetNode.brainId);
+      context.save();
+      context.strokeStyle = crossBrain ? "rgba(255,199,102,.44)" : "rgba(150,176,210,.22)";
+      context.lineWidth = crossBrain ? 1.2 : 0.65;
+      context.setLineDash(crossBrain ? [5, 6] : []);
+      context.beginPath();
+      context.moveTo(source.x, source.y);
+      context.lineTo(target.x, target.y);
+      context.stroke();
+      context.restore();
+    });
+    const needle = search.trim().toLowerCase();
+    nodes.forEach((node) => {
+      const position = points.get(node.id);
+      if (!position) return;
+      const visual = brainVisual(node.brainId);
+      const degree = degrees.get(node.id) ?? 0;
+      const radius = Math.max(3.2, Math.min(16, atlasNodeDiameter(node, degree) * 0.46 * Math.sqrt(camera.scale)));
+      const matches = !needle || node.label.toLowerCase().includes(needle) || node.relativePath?.toLowerCase().includes(needle);
+      const focused = selectedNode === node.id || hoveredNode === node.id;
+      const showLabel = focused || (matches && Boolean(needle)) || (camera.scale >= 1.2 && (node.kind === "brain" || degree >= 5));
+      const alpha = needle && !matches && !focused ? 0.16 : 0.9;
+      context.save();
+      context.globalAlpha = alpha;
+      context.fillStyle = visual.color;
+      context.shadowColor = visual.color;
+      context.shadowBlur = focused ? 18 : degree >= 5 ? 9 : 5;
+      context.beginPath();
+      context.arc(position.x, position.y, radius, 0, Math.PI * 2);
+      context.fill();
+      if (focused || latestRouteIds.has(node.brainId)) {
+        context.shadowBlur = 0;
+        context.strokeStyle = focused ? "rgba(255,224,161,.96)" : "rgba(118,228,255,.55)";
+        context.lineWidth = focused ? 1.8 : 1;
+        context.beginPath();
+        context.arc(position.x, position.y, radius + (focused ? 4 : 2), 0, Math.PI * 2);
+        context.stroke();
+      }
+      if (showLabel) {
+        context.shadowBlur = 0;
+        context.globalAlpha = 0.95;
+        context.font = `${node.kind === "brain" ? 600 : 500} ${Math.max(11, Math.min(15, 11 + camera.scale))}px Inter, -apple-system, sans-serif`;
+        context.fillStyle = "rgba(234,241,255,.92)";
+        context.textAlign = position.x > width * 0.72 ? "right" : "left";
+        context.textBaseline = "middle";
+        context.fillText(node.label, position.x + (position.x > width * 0.72 ? -radius - 7 : radius + 7), position.y);
+      }
+      context.restore();
+    });
+  }, [camera, degrees, edges, height, hoveredNode, latestRouteIds, nodes, positions, search, selectedNode, width]);
+  return <canvas ref={canvasRef} className="atlas-canvas" aria-hidden="true" />;
 }
 
 export default function App() {
@@ -916,6 +1148,8 @@ export default function App() {
   const graphPhysicsFrameRef = useRef<number | null>(null);
   const graphPhysicsLastRenderRef = useRef(0);
   const graphPhysicsLiveRef = useRef(false);
+  const graphAutoFitPendingRef = useRef(true);
+  const graphAutoFitPhysicsStateRef = useRef(false);
   const [addBrain, setAddBrain] = useState<{
     selectionToken: string;
     displayPath?: string;
@@ -988,9 +1222,15 @@ export default function App() {
         label: choice.label,
         role: choice.role,
         installed: isInstalledModel(choice.id, status?.model.installedModels ?? []),
-        downloadSize: modelCatalog[choice.id]?.downloadSize,
-        recommendedContext: modelCatalog[choice.id]?.context,
-        capabilities: [],
+        downloadSize: modelCatalogEntry(choice.id)?.downloadSize,
+        recommendedContext: modelCatalogEntry(choice.id)?.context,
+        capabilities: modelCatalogEntry(choice.id)?.capabilities ?? [],
+        license: modelCatalogEntry(choice.id)?.license,
+        licenseUrl: modelCatalogEntry(choice.id)?.licenseUrl,
+        sourceUrl: modelCatalogEntry(choice.id)?.sourceUrl,
+        releaseDate: modelCatalogEntry(choice.id)?.releaseDate,
+        catalogDigest: modelCatalogEntry(choice.id)?.digest,
+        reasoningMode: modelCatalogEntry(choice.id)?.reasoningMode,
       }));
     const modelsById = new Map<string, LocalSetupModel>();
     sourceModels.forEach((model) => {
@@ -1016,7 +1256,7 @@ export default function App() {
         seen.add(key);
         return true;
       })
-      .slice(0, 4);
+      .slice(0, 3);
   }, [catalogModels, localSetup?.recommendedModels, status?.model.selectedModel]);
   const selectedModelCard = useMemo<LocalSetupModel | null>(() => {
     const selectedModel = status?.model.selectedModel;
@@ -1194,7 +1434,8 @@ export default function App() {
   useEffect(() => {
     manualGraphPositionsRef.current = manualGraphPositions;
     try {
-      window.localStorage.setItem(graphManualLayoutStorageKey, JSON.stringify(manualGraphPositions));
+      const layout: AtlasLayoutV2 = { version: 2, positions: manualGraphPositions, savedAt: new Date().toISOString() };
+      window.localStorage.setItem(graphManualLayoutStorageKey, JSON.stringify(layout));
     } catch {
       // Node arrangement remains usable for this session if local storage is unavailable.
     }
@@ -1293,9 +1534,11 @@ export default function App() {
       const payload = asRecord(event.payload);
       const turnId = typeof payload?.turnId === "string" ? payload.turnId : undefined;
       const delta = typeof payload?.delta === "string" ? payload.delta : undefined;
-      if (!turnId || !delta) return;
+      const thinking = payload?.thinking === true;
+      const done = payload?.done === true;
+      if (!turnId) return;
       setStreamingAssistant((current) => current?.turnId === turnId
-        ? { ...current, body: `${current.body}${delta}` }
+        ? { ...current, body: `${current.body}${delta ?? ""}`, thinking: thinking && !done }
         : current);
     }).then((unlisten) => {
       dispose = unlisten;
@@ -1376,7 +1619,7 @@ export default function App() {
         }
         return;
       }
-      if (view !== "chat" && view !== "map") {
+      if (view !== "chat" && view !== "atlas" && view !== "lab") {
         setView("chat");
         return;
       }
@@ -1481,7 +1724,7 @@ export default function App() {
   }, [nativeRuntime]);
 
   useEffect(() => {
-    if (view === "map") void refreshGraph();
+    if (view === "atlas") void refreshGraph();
     if (view === "settings") void refreshBrains();
   }, [view]);
 
@@ -1707,7 +1950,7 @@ export default function App() {
     setBusy(true);
     setError(null);
     if (turnId) {
-      setStreamingAssistant({ turnId, body: "", createdAt: new Date().toISOString() });
+      setStreamingAssistant({ turnId, body: "", thinking: false, createdAt: new Date().toISOString() });
     }
     const userMessage: ChatMessage = {
       id: makeId("user"),
@@ -1828,6 +2071,19 @@ export default function App() {
       await refreshStatus();
     }
     setModelOperation(null);
+  };
+
+  const runLocalBenchmark = async (model: string) => {
+    setSetupFeedback(`Running the bounded 32K readiness benchmark for ${model}…`);
+    const result = await callFeature<Record<string, unknown>>(
+      "benchmark_local_model",
+      { request: { model, prompt: "Kairos fixed local benchmark suite" } },
+      "The native benchmark command is not available in this build yet.",
+    );
+    if (result) {
+      const passed = result.passed === true;
+      setSetupFeedback(`${model}: ${passed ? "passed" : "did not pass"} · ${typeof result.totalAnswerLatencyMs === "number" ? `${result.totalAnswerLatencyMs} ms total` : "timing recorded"}. No model or context was changed.`);
+    }
   };
 
   const openOllamaInstall = async () => {
@@ -2063,16 +2319,14 @@ export default function App() {
   const graphNodes = useMemo(() => graph.nodes
     .filter((node) => {
       const matchesBrain = graphFilter === "all" || node.brainId === graphFilter || node.id === "kairos";
-      const needle = graphSearch.trim().toLowerCase();
-      const matchesSearch = isKairosGraphNode(node) || !needle || node.label.toLowerCase().includes(needle);
-      return matchesBrain && matchesSearch && !node.protected;
+      return matchesBrain && !node.protected && node.kind !== "tag" && node.kind !== "folder";
     })
     .map((node) => {
       const physicsPosition = physicsGraphPositions[node.id] ?? manualGraphPositions[node.id];
       return physicsPosition && !isKairosGraphNode(node) ? { ...node, ...physicsPosition } : node;
     }), [graph, graphFilter, graphSearch, manualGraphPositions, physicsGraphPositions]);
   const graphNodeIds = new Set(graphNodes.map((node) => node.id));
-  const graphEdges = graph.edges.filter((edge) => graphNodeIds.has(edge.source) && graphNodeIds.has(edge.target));
+  const graphEdges = graph.edges.filter((edge) => isAtlasVisibleEdge(edge) && graphNodeIds.has(edge.source) && graphNodeIds.has(edge.target));
   const graphConnectionDegrees = useMemo(() => meaningfulConnectionDegrees(
     graph.nodes.filter((node) => !node.protected && !isKairosGraphNode(node)),
     graph.edges,
@@ -2080,11 +2334,6 @@ export default function App() {
   const graphNodeById = useMemo(() => new Map(graphNodes.map((node) => [node.id, node])), [graphNodes]);
   const graphWorldNodes = useMemo(() => graphNodes.filter((node) => !isKairosGraphNode(node)), [graphNodes]);
   const graphWorldEdges = useMemo(() => graphEdges.filter((edge) => edge.source !== "kairos" && edge.target !== "kairos"), [graphEdges]);
-  const graphAnchorEdges = useMemo(() => graphEdges.flatMap((edge) => {
-    if (edge.source !== "kairos" && edge.target !== "kairos") return [];
-    const node = graphNodeById.get(edge.source === "kairos" ? edge.target : edge.source);
-    return node && !isKairosGraphNode(node) ? [{ edge, node }] : [];
-  }), [graphEdges, graphNodeById]);
   const latestRoutes = useMemo(() => [...chatMessages]
     .reverse()
     .find((message) => message.role === "assistant" && message.routes?.length)?.routes ?? [], [chatMessages]);
@@ -2118,7 +2367,7 @@ export default function App() {
   const fitGraph = () => {
     setPreviousGraphCamera(null);
     setSelectedGraphNode(null);
-    setGraphCamera(graphCameraFit);
+    setGraphCamera(graphCameraForNodes(graphWorldNodes, graphViewportSize.width, graphViewportSize.height));
   };
   const focusGraphNode = (node: GraphNode) => {
     if (isKairosGraphNode(node)) {
@@ -2145,8 +2394,42 @@ export default function App() {
     const delta = event.deltaY > 0 ? -0.16 : 0.16;
     zoomGraphAt(graphCamera.scale + delta, event.clientX - bounds.left, event.clientY - bounds.top);
   };
+  const graphNodeAtPoint = (clientX: number, clientY: number, bounds: DOMRect) => {
+    const x = clientX - bounds.left;
+    const y = clientY - bounds.top;
+    let closestNode: GraphNode | null = null;
+    let closestDistance = Number.POSITIVE_INFINITY;
+    for (const node of graphWorldNodes) {
+      const pointX = graphCamera.x + ((node.x ?? 50) / 100) * graphViewportSize.width * graphCamera.scale;
+      const pointY = graphCamera.y + ((node.y ?? 50) / 100) * graphViewportSize.height * graphCamera.scale;
+      const radius = Math.max(7, atlasNodeDiameter(node, graphConnectionDegrees.get(node.id) ?? 0) * 0.7 * Math.sqrt(graphCamera.scale));
+      const distance = Math.hypot(x - pointX, y - pointY);
+      if (distance <= radius + 6 && distance < closestDistance) {
+        closestNode = node;
+        closestDistance = distance;
+      }
+    }
+    return closestNode;
+  };
   const handleGraphPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if ((event.target as HTMLElement).closest("button, input, .graph-inspector, .graph-minimap")) return;
+    if (event.button !== 0) return;
+    const node = graphNodeAtPoint(event.clientX, event.clientY, event.currentTarget.getBoundingClientRect());
+    if (node) {
+      event.preventDefault();
+      setHoveredGraphNode(node.id);
+      graphNodeDragRef.current = {
+        pointerId: event.pointerId,
+        nodeId: node.id,
+        startClientX: event.clientX,
+        startClientY: event.clientY,
+        startPosition: { x: node.x ?? 50, y: node.y ?? 50 },
+        scale: graphCamera.scale,
+        moved: false,
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+      return;
+    }
     graphDragRef.current = {
       pointerId: event.pointerId,
       startX: event.clientX,
@@ -2154,21 +2437,6 @@ export default function App() {
       camera: graphCamera,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
-  };
-  const handleGraphNodePointerDown = (event: ReactPointerEvent<HTMLButtonElement>, node: GraphNode) => {
-    if (event.button !== 0) return;
-    event.preventDefault();
-    event.stopPropagation();
-    graphNodeDragRef.current = {
-      pointerId: event.pointerId,
-      nodeId: node.id,
-      startClientX: event.clientX,
-      startClientY: event.clientY,
-      startPosition: { x: node.x ?? 50, y: node.y ?? 50 },
-      scale: graphCamera.scale,
-      moved: false,
-    };
-    graphCanvasRef.current?.setPointerCapture(event.pointerId);
   };
   const handleGraphNodeClick = (node: GraphNode) => {
     if (suppressGraphNodeClickRef.current === node.id) {
@@ -2201,7 +2469,11 @@ export default function App() {
       return;
     }
     const drag = graphDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) return;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      const node = graphNodeAtPoint(event.clientX, event.clientY, event.currentTarget.getBoundingClientRect());
+      setHoveredGraphNode((current) => current === (node?.id ?? null) ? current : node?.id ?? null);
+      return;
+    }
     setGraphCamera({
       ...drag.camera,
       x: drag.camera.x + event.clientX - drag.startX,
@@ -2230,6 +2502,9 @@ export default function App() {
         window.setTimeout(() => {
           if (suppressGraphNodeClickRef.current === nodeDrag.nodeId) suppressGraphNodeClickRef.current = null;
         }, 0);
+      } else {
+        const node = graphNodeById.get(nodeDrag.nodeId);
+        if (node) handleGraphNodeClick(node);
       }
       graphNodeDragRef.current = null;
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
@@ -2270,6 +2545,22 @@ export default function App() {
   };
 
   useEffect(() => {
+    graphAutoFitPendingRef.current = true;
+  }, [expanded, graph, graphFilter, view]);
+
+  useEffect(() => {
+    if (!expanded || view !== "atlas" || !graphAutoFitPendingRef.current) return;
+    if (graphViewportSize.width <= 1 || graphViewportSize.height <= 1 || graphWorldNodes.length === 0) return;
+    const wasPhysicsActive = graphAutoFitPhysicsStateRef.current;
+    const physicsTransitioned = wasPhysicsActive !== graphPhysicsActive;
+    if (!graphPhysicsActive || physicsTransitioned) {
+      setGraphCamera(graphCameraForNodes(graphWorldNodes, graphViewportSize.width, graphViewportSize.height));
+      if (!graphPhysicsActive && wasPhysicsActive) graphAutoFitPendingRef.current = false;
+    }
+    graphAutoFitPhysicsStateRef.current = graphPhysicsActive;
+  }, [expanded, graphPhysicsActive, graphViewportSize, graphWorldNodes, view]);
+
+  useEffect(() => {
     if (selectedGraphNode && !graphNodeIds.has(selectedGraphNode)) {
       setSelectedGraphNode(null);
       setPreviousGraphCamera(null);
@@ -2298,7 +2589,7 @@ export default function App() {
   };
   const renderModelCard = (setupModel: LocalSetupModel, kind: "recommended" | "advanced") => {
     const id = setupModel.id;
-    const fallback = modelCatalog[id];
+    const fallback = modelCatalogEntry(id);
     const installed = setupModel.installed ?? isInstalledModel(id, status?.model.installedModels ?? []);
     const selected = sameModelId(status?.model.selectedModel ?? "", id);
     const working = modelOperation !== null && sameModelId(modelOperation.model, id);
@@ -2318,10 +2609,12 @@ export default function App() {
         </div>
         <dl>
           <div><dt>Download</dt><dd>{setupModel.downloadSize ?? fallback?.downloadSize ?? "Reported by Ollama during download"}</dd></div>
-          <div><dt>Context</dt><dd>32K target</dd></div>
+          <div><dt>Context</dt><dd>{setupModel.recommendedContext ?? fallback?.context ?? "32K target"}</dd></div>
+          {(setupModel.releaseDate ?? fallback?.releaseDate) && <div><dt>Release</dt><dd>{setupModel.releaseDate ?? fallback?.releaseDate}</dd></div>}
+          {(setupModel.license ?? fallback?.license) && <div><dt>Licence</dt><dd>{setupModel.licenseUrl ? <a href={setupModel.licenseUrl} target="_blank" rel="noreferrer">{setupModel.license}</a> : setupModel.license ?? fallback?.license}</dd></div>}
         </dl>
         {capabilities.length > 0 && <div className="model-capability-list" aria-label="Model capabilities">{capabilities.map((capability) => <span key={capability}>{capability}</span>)}</div>}
-        {setupModel.whyRecommended && <p className="model-card__why">{setupModel.whyRecommended}</p>}
+        {(setupModel.whyRecommended ?? fallback?.reasoningMode === "required") && <p className="model-card__why">{setupModel.whyRecommended ?? "Reasoning mode is required by this artifact; Kairos hides raw reasoning and keeps only the final answer."}</p>}
         {knownWarning && <small className="model-card__warning">{knownWarning}</small>}
         <div className="model-card__actions">
           {fit && <StatusPill tone={modelFitTone(fit)}>{modelFitLabel(fit).toUpperCase()}</StatusPill>}
@@ -2364,27 +2657,23 @@ export default function App() {
         {expanded && (
           <nav className="primary-nav" aria-label="Kairos sections">
             {([
-              ["history", "Chat history", "◌"],
-              ["next", "What Next", "✦"],
-              ["settings", "Settings", "⚙"],
-            ] as Array<[NavId, string, string]>).map(([id, label, icon]) => (
+              ["atlas", "Atlas"],
+              ["next", "What Next"],
+              ["lab", "Local AI Lab"],
+              ["settings", "Settings"],
+            ] as Array<[NavId, string]>).map(([id, label]) => (
               <button
                 key={id}
-                className={`nav-button ${(id === "history" ? historyOpen : view === id) ? "is-active" : ""}`}
+                className={`nav-button ${view === id ? "is-active" : ""}`}
                 onClick={() => {
-                  if (id === "history") {
-                    setView("chat");
-                    setHistoryOpen((open) => !open);
-                  } else {
-                    setHistoryOpen(false);
-                    showView(id);
-                  }
+                  setHistoryOpen(false);
+                  showView(id);
                 }}
-                aria-current={id !== "history" && view === id ? "page" : undefined}
+                aria-current={view === id ? "page" : undefined}
                 aria-label={label}
                 title={label}
               >
-                <span className="nav-button__icon" aria-hidden="true">{icon}</span>
+                <span className="nav-button__icon"><NavGlyph id={id} /></span>
                 <span className="nav-button__label">{label}</span>
               </button>
             ))}
@@ -2477,7 +2766,9 @@ export default function App() {
               {streamingAssistant && (
                 <article className="chat-message chat-message--assistant is-streaming" aria-label="Kairos is replying">
                   <div className="message-meta"><span>Kairos</span><span>Ollama · local</span><time>{shortDate(streamingAssistant.createdAt)}</time></div>
-                  {streamingAssistant.body ? <p>{streamingAssistant.body}<span className="stream-caret" aria-hidden="true" /></p> : <div className="stream-pending"><KairosLoader /><span>Composing from approved local context…</span></div>}
+                  {streamingAssistant.body
+                    ? <><p>{streamingAssistant.body}<span className="stream-caret" aria-hidden="true" /></p>{streamingAssistant.thinking && <div className="thinking-indicator"><KairosLoader /><span>Thinking…</span></div>}</>
+                    : <div className="stream-pending"><KairosLoader /><span>{streamingAssistant.thinking ? "Thinking…" : "Composing from approved local context…"}</span></div>}
                 </article>
               )}
               {busy && !streamingAssistant && (
@@ -2695,7 +2986,7 @@ export default function App() {
           </section>
         )}
 
-        {expanded && (
+        {expanded && view === "atlas" && (
           <section className="map-surface cockpit-map">
             <div className="surface-heading">
               <div>
@@ -2735,54 +3026,19 @@ export default function App() {
                 onPointerUp={finishGraphPointer}
                 onPointerCancel={finishGraphPointer}
               >
-                <svg className="graph-anchor-lines" aria-hidden="true">
-                  {graphAnchorEdges.map(({ edge, node }) => {
-                    const targetX = graphCamera.x + ((node.x ?? 50) / 100) * graphViewportSize.width * graphCamera.scale;
-                    const targetY = graphCamera.y + ((node.y ?? 50) / 100) * graphViewportSize.height * graphCamera.scale;
-                    const active = latestRouteIds.has(node.brainId);
-                    return <line key={edge.id ?? `kairos-${node.id}`} className={active ? "is-active-route" : ""} x1="0" y1={graphViewportSize.height / 2} x2={targetX} y2={targetY} />;
-                  })}
-                </svg>
-                <div
-                  className="graph-world"
-                  style={{ transform: `translate3d(${graphCamera.x}px, ${graphCamera.y}px, 0) scale(${graphCamera.scale})` }}
-                >
-                  <svg className="graph-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
-                  {graphWorldEdges.map((edge) => {
-                    const source = graphNodeById.get(edge.source);
-                    const target = graphNodeById.get(edge.target);
-                    if (!source || !target) return null;
-                    const kind = edge.kind?.toLowerCase() ?? "";
-                    const explicitLink = ["wiki_link", "markdown_link", "embed"].includes(kind);
-                    const crossBrain = explicitLink && source.brainId !== target.brainId && source.brainId !== "kairos" && target.brainId !== "kairos";
-                    return <line key={edge.id ?? `${edge.source}-${edge.target}-${edge.kind ?? ""}`} className={`${kind === "contains" ? "is-containment" : ""} ${kind === "tag" ? "is-tag" : ""} ${crossBrain ? "is-cross-brain" : ""}`} x1={source.x} y1={source.y} x2={target.x} y2={target.y} />;
-                  })}
-                  </svg>
-                {graphWorldNodes.map((node) => {
-                  const visual = brainVisual(node.brainId);
-                  const connectionDegree = graphConnectionDegrees.get(node.id) ?? 0;
-                  const nodeDiameter = atlasNodeDiameter(node, connectionDegree);
-                  const showLabel = selectedGraphNode === node.id || hoveredGraphNode === node.id || (Boolean(graphSearch.trim()) && graphWorldNodes.length <= 8);
-                  const labelLeft = (node.x ?? 50) > 65;
-                  return (
-                    <button
-                      key={node.id}
-                      className={`graph-node graph-node--${node.kind ?? "note"} ${selectedGraphNode === node.id ? "is-selected" : ""} ${showLabel ? "shows-label" : ""} ${labelLeft ? "label-left" : ""}`}
-                      style={{ "--node-color": visual.color, "--node-size": `${nodeDiameter}px`, left: `${node.x ?? 50}%`, top: `${node.y ?? 50}%` } as CSSProperties}
-                      onPointerDown={(event) => handleGraphNodePointerDown(event, node)}
-                      onClick={() => handleGraphNodeClick(node)}
-                      onMouseEnter={() => setHoveredGraphNode(node.id)}
-                      onMouseLeave={() => setHoveredGraphNode((current) => current === node.id ? null : current)}
-                      onFocus={() => setHoveredGraphNode(node.id)}
-                      onBlur={() => setHoveredGraphNode((current) => current === node.id ? null : current)}
-                      title={`Drag to arrange · ${node.label} · ${connectionDegree} meaningful connection${connectionDegree === 1 ? "" : "s"} · ${visual.label}`}
-                    >
-                      <span className="graph-node__dot" />
-                      {showLabel && <span className="graph-node__label">{node.label}</span>}
-                    </button>
-                  );
-                })}
-                </div>
+                <AtlasCanvas
+                  nodes={graphWorldNodes}
+                  edges={graphWorldEdges}
+                  positions={Object.fromEntries(graphWorldNodes.map((node) => [node.id, { x: node.x ?? 50, y: node.y ?? 50 }]))}
+                  width={graphViewportSize.width}
+                  height={graphViewportSize.height}
+                  camera={graphCamera}
+                  selectedNode={selectedGraphNode}
+                  hoveredNode={hoveredGraphNode}
+                  search={graphSearch}
+                  degrees={graphConnectionDegrees}
+                  latestRouteIds={latestRouteIds}
+                />
                 <button
                   className={`kairos-seam-node ${streamingAssistant || busy ? "is-routing" : ""}`}
                   type="button"
@@ -2818,6 +3074,7 @@ export default function App() {
                   <rect className="graph-minimap__viewport" x={minimapViewport.x} y={minimapViewport.y} width={minimapViewport.width} height={minimapViewport.height} />
                 </svg>
                 {graphWorldNodes.length === 0 && <div className="graph-empty">No matching public graph metadata.</div>}
+                {graphWorldNodes.length > 0 && <details className="atlas-note-list"><summary>Keyboard note list <span>{graphWorldNodes.length}</span></summary><div>{graphWorldNodes.slice().sort((left, right) => left.label.localeCompare(right.label)).map((node) => <button key={`list-${node.id}`} type="button" onClick={() => focusGraphNode(node)}>{node.label}</button>)}</div></details>}
                 {graphNode && (
                   <aside className="graph-inspector">
                     <div className="graph-inspector__heading">
@@ -2837,6 +3094,37 @@ export default function App() {
                 )}
               </div>
             </div>
+          </section>
+        )}
+
+        {expanded && view === "lab" && (
+          <section className="lab-surface">
+            <div className="surface-heading">
+              <div>
+                <p className="section-label">Local AI Lab</p>
+                <h1>Learn what your Mac can run.</h1>
+                <p>Local inference stays the default. Kairos never downloads, switches, or falls back without an explicit action.</p>
+              </div>
+              <div className="surface-heading__actions">
+                <StatusPill tone={ollamaRunning ? "success" : "warning"}>{ollamaRunning ? "OLLAMA READY" : ollamaInstalled ? "START OLLAMA" : "INSTALL OLLAMA"}</StatusPill>
+                <button className="secondary-action" type="button" onClick={() => void refreshStatus()}>Refresh</button>
+              </div>
+            </div>
+            <div className="lab-health-grid">
+              <article className="lab-fact"><span>Hardware</span><strong>{hardwareProfileLabel}</strong><small>{primaryFitLimitGb ? `${primaryFitLimitGb} GB primary fit limit` : "Detecting primary fit limit"}</small></article>
+              <article className="lab-fact"><span>Memory preference</span><strong>{effectiveMemoryBudget ? `${effectiveMemoryBudget} GB cap` : "Auto"}</strong><small>{localSetup?.memoryBudgetPlanningOnly ? "Planning cap only · no allocation change" : "Planning cap"}</small></article>
+              <article className="lab-fact"><span>Context target</span><strong>{(localSetup?.contextWindowTokens ?? 32_768) / 1024}K</strong><small>Never lowered silently</small></article>
+              <article className="lab-fact"><span>Available disk</span><strong>{availableDiskGb ? `${availableDiskGb} GB` : "Unknown"}</strong><small>Model package space</small></article>
+            </div>
+            {!ollamaInstalled && <div className="inline-banner inline-banner--warning"><div><strong>Ollama is not installed.</strong><span>Install the official macOS app, then return here to inspect models.</span></div><button className="primary-action" type="button" onClick={() => void openOllamaInstall()}>Install Ollama</button></div>}
+            {ollamaInstalled && !ollamaRunning && <div className="inline-banner inline-banner--warning"><div><strong>Ollama is installed but not running.</strong><span>Open Ollama, then refresh Kairos. No model will be substituted.</span></div><button className="secondary-action" type="button" onClick={() => void refreshStatus()}>Check again</button></div>}
+            <section className="lab-section" id="lab-recommended-models">
+              <div className="settings-card__heading"><div><p className="section-label">Manager shortlist</p><h2>Three focused local roles</h2></div><span className="metadata-label">32K fit · exact tags</span></div>
+              {recommendedModelCards.length > 0 ? <div className="model-grid">{recommendedModelCards.map((setupModel) => renderModelCard(setupModel, "recommended"))}</div> : <p className="model-catalog-empty">No model is comfortable for this exact hardware and 32K plan. Open the full catalog to inspect test-required variants; Kairos keeps your current model unchanged.</p>}
+            </section>
+            {selectedModelCard && <section className="lab-section lab-current-model"><div className="settings-card__heading"><div><p className="section-label">Current selection</p><h2>{selectedModelCard.label ?? selectedModelCard.id}</h2></div><StatusPill tone={modelFitTone(selectedModelCard.fit)}>{selectedModelCard.installed ? "SELECTED" : "NOT INSTALLED"}</StatusPill></div><p><code>{selectedModelCard.id}</code> · {currentModelFit?.message ?? "Fit is being assessed."}</p><div className="current-model-fit__actions"><button className="text-action" type="button" onClick={() => void handleTestModel(selectedModelCard.id)} disabled={!selectedModelCard.installed || Boolean(modelOperation) || planningBusy}>Test current at 32K</button><button className="secondary-action" type="button" onClick={() => setShowAllModels(true)}>Open full catalog</button></div></section>}
+            <section className="lab-section benchmark-card"><div><p className="section-label">Benchmark</p><h2>Compare before retiring Qwen3</h2><p>Run the same 32K prompt and retrieval pack against installed <code>qwen3:8b</code> and LFM2.5. Kairos records load time, first token, total latency, tokens per second, context loaded, memory pressure, routing, citations, tool calls, and structured output without storing private prompts.</p></div><div className="benchmark-card__actions"><StatusPill tone="neutral">EXPLICIT RUN</StatusPill><button className="secondary-action" type="button" onClick={() => void runLocalBenchmark("lfm2.5:8b-a1b-q4_K_M")}>Test LFM2.5 at 32K</button><button className="text-action" type="button" onClick={() => void runLocalBenchmark("qwen3:8b")}>Test Qwen3 8B</button></div></section>
+            <section className="lab-section"><div className="settings-card__heading"><div><p className="section-label">Advanced catalog</p><h2>Installed and experimental models</h2></div><button className="secondary-action" type="button" onClick={() => setShowAllModels((visible) => !visible)}>{showAllModels ? "Hide catalog" : "Show all models"}</button></div>{showAllModels && <div className="model-grid model-grid--advanced">{advancedModelCards.map((setupModel) => renderModelCard(setupModel, "advanced"))}</div>}</section>
           </section>
         )}
 

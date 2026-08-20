@@ -35,7 +35,7 @@ pub enum WritePolicy {
 
 pub const DEFAULT_OLLAMA_ENDPOINT: &str = "http://localhost:11434";
 pub const DEFAULT_LOCAL_MODEL: &str = "qwen3.6:35b-mlx";
-pub const FAST_ROUTER_MODEL: &str = "qwen3:8b";
+pub const FAST_ROUTER_MODEL: &str = "lfm2.5:8b-a1b-q4_K_M";
 pub const OPTIONAL_LOCAL_MODELS: [&str; 2] = ["gpt-oss:20b", "glm-4.7-flash:latest"];
 pub const DEFAULT_CONTEXT_WINDOW_TOKENS: u32 = 32_768;
 pub const CURRENT_CONFIG_VERSION: u32 = 3;
@@ -550,6 +550,12 @@ pub struct LocalModelProfile {
     pub minimum_memory_gb: u16,
     pub recommended_memory_gb: u16,
     pub maximum_context_tokens: Option<u32>,
+    pub release_date: Option<String>,
+    pub license: Option<String>,
+    pub license_url: Option<String>,
+    pub source_url: Option<String>,
+    pub catalog_digest: Option<String>,
+    pub reasoning_mode: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -601,22 +607,12 @@ struct HardwareFitTable {
     cpu_only: Option<MemoryRequirement>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum RecommendationRole {
-    Fast,
-    Balanced,
-    Reasoning,
-    Specialist,
-}
-
 #[derive(Clone, Copy)]
 struct LocalModelProfileSpec {
     id: &'static str,
     aliases: &'static [&'static str],
     label: &'static str,
     role: &'static str,
-    recommendation_role: RecommendationRole,
-    quality_rank: u8,
     quantization: &'static str,
     capabilities: &'static [&'static str],
     why_recommended: &'static str,
@@ -626,17 +622,41 @@ struct LocalModelProfileSpec {
     requires_verification: bool,
 }
 
-const LOCAL_MODEL_PROFILE_SPECS: [LocalModelProfileSpec; 14] = [
+const LOCAL_MODEL_PROFILE_SPECS: [LocalModelProfileSpec; 16] = [
     LocalModelProfileSpec {
         id: FAST_ROUTER_MODEL,
         aliases: &[],
-        label: "Qwen 3 8B",
+        label: "LFM2.5 8B A1B",
         role: "Fast everyday chat and routing",
-        recommendation_role: RecommendationRole::Fast,
-        quality_rank: 1,
+        quantization: "Q4_K_M",
+        capabilities: &["Text", "Reasoning", "Routing", "Tools"],
+        why_recommended: "A current on-device assistant with low active compute for fast routing, chained tool calls, and private everyday chat.",
+        package_size_bytes: 5_200_000_000,
+        fits: HardwareFitTable {
+            apple_unified: Some(MemoryRequirement {
+                minimum_gb: 12,
+                comfortable_gb: 16,
+            }),
+            nvidia_vram: Some(MemoryRequirement {
+                minimum_gb: 12,
+                comfortable_gb: 16,
+            }),
+            cpu_only: Some(MemoryRequirement {
+                minimum_gb: 20,
+                comfortable_gb: 24,
+            }),
+        },
+        maximum_context_tokens: 125_000,
+        requires_verification: true,
+    },
+    LocalModelProfileSpec {
+        id: "qwen3:8b",
+        aliases: &[],
+        label: "Qwen 3 8B",
+        role: "Legacy fast router (Advanced)",
         quantization: "Q4_K_M",
         capabilities: &["Text", "Routing", "Summaries"],
-        why_recommended: "The lightest conservative 32K option for fast everyday chat and routing.",
+        why_recommended: "Existing Qwen3 installation retained for an explicit local A/B comparison with LFM2.5.",
         package_size_bytes: 5_200_000_000,
         fits: HardwareFitTable {
             apple_unified: Some(MemoryRequirement {
@@ -656,12 +676,36 @@ const LOCAL_MODEL_PROFILE_SPECS: [LocalModelProfileSpec; 14] = [
         requires_verification: false,
     },
     LocalModelProfileSpec {
+        id: "gemma4:12b-mlx",
+        aliases: &[],
+        label: "Gemma 4 12B MLX",
+        role: "Balanced multimodal assistant",
+        quantization: "MLX",
+        capabilities: &["Text", "Vision", "Audio", "Documents", "Coding", "Tools"],
+        why_recommended: "A balanced multimodal laptop model for documents, vision, audio, coding, and tool-aware work.",
+        package_size_bytes: 7_700_000_000,
+        fits: HardwareFitTable {
+            apple_unified: Some(MemoryRequirement {
+                minimum_gb: 20,
+                comfortable_gb: 24,
+            }),
+            nvidia_vram: Some(MemoryRequirement {
+                minimum_gb: 16,
+                comfortable_gb: 24,
+            }),
+            cpu_only: Some(MemoryRequirement {
+                minimum_gb: 28,
+                comfortable_gb: 32,
+            }),
+        },
+        maximum_context_tokens: 131_072,
+        requires_verification: false,
+    },
+    LocalModelProfileSpec {
         id: "gemma3:12b",
         aliases: &[],
         label: "Gemma 3 12B",
         role: "Balanced vision and document assistant",
-        recommendation_role: RecommendationRole::Specialist,
-        quality_rank: 2,
         quantization: "Q4_K_M",
         capabilities: &["Text", "Vision", "Documents"],
         why_recommended: "A compact multimodal choice for documents and image-aware work.",
@@ -688,8 +732,6 @@ const LOCAL_MODEL_PROFILE_SPECS: [LocalModelProfileSpec; 14] = [
         aliases: &[],
         label: "Qwen 3 14B",
         role: "Balanced general assistant",
-        recommendation_role: RecommendationRole::Balanced,
-        quality_rank: 2,
         quantization: "Q4_K_M",
         capabilities: &["Text", "Reasoning"],
         why_recommended: "A stronger everyday text model without moving into the large-model tier.",
@@ -716,8 +758,6 @@ const LOCAL_MODEL_PROFILE_SPECS: [LocalModelProfileSpec; 14] = [
         aliases: &[],
         label: "GPT-OSS 20B",
         role: "Strong reasoning and structured work",
-        recommendation_role: RecommendationRole::Reasoning,
-        quality_rank: 3,
         quantization: "MXFP4",
         capabilities: &["Text", "Reasoning", "Tools", "Structured output"],
         why_recommended: "The first comfortably fitting reasoning and tools step above everyday models.",
@@ -744,8 +784,6 @@ const LOCAL_MODEL_PROFILE_SPECS: [LocalModelProfileSpec; 14] = [
         aliases: &[],
         label: "Qwen 3.6 27B",
         role: "Higher-quality general and vision work",
-        recommendation_role: RecommendationRole::Balanced,
-        quality_rank: 4,
         quantization: "Q4_K_M",
         capabilities: &["Text", "Vision", "Coding"],
         why_recommended: "A stronger all-round Apple or GPU option when the 32K plan has real headroom.",
@@ -772,8 +810,6 @@ const LOCAL_MODEL_PROFILE_SPECS: [LocalModelProfileSpec; 14] = [
         aliases: &[],
         label: "Mistral Small 3.2 24B",
         role: "Tools, vision, and document workflows",
-        recommendation_role: RecommendationRole::Specialist,
-        quality_rank: 4,
         quantization: "Q4_K_M",
         capabilities: &["Text", "Vision", "Tools", "Documents"],
         why_recommended: "A specialist for robust tool calls, documents, and image-aware workflows.",
@@ -800,8 +836,6 @@ const LOCAL_MODEL_PROFILE_SPECS: [LocalModelProfileSpec; 14] = [
         aliases: &[],
         label: "Gemma 3 27B",
         role: "High-quality vision and documents",
-        recommendation_role: RecommendationRole::Specialist,
-        quality_rank: 4,
         quantization: "Q4_K_M",
         capabilities: &["Text", "Vision", "Documents"],
         why_recommended: "The stronger document and vision choice once the 32K plan has comfortable headroom.",
@@ -828,8 +862,6 @@ const LOCAL_MODEL_PROFILE_SPECS: [LocalModelProfileSpec; 14] = [
         aliases: &[],
         label: "Qwen 3 30B",
         role: "Research synthesis and reasoning",
-        recommendation_role: RecommendationRole::Reasoning,
-        quality_rank: 4,
         quantization: "Q4_K_M",
         capabilities: &["Text", "Reasoning", "Research"],
         why_recommended: "A larger reasoning option for research synthesis when it comfortably fits at 32K.",
@@ -856,8 +888,6 @@ const LOCAL_MODEL_PROFILE_SPECS: [LocalModelProfileSpec; 14] = [
         aliases: &[],
         label: "Qwen 3 32B",
         role: "Higher-quality dense reasoning",
-        recommendation_role: RecommendationRole::Reasoning,
-        quality_rank: 5,
         quantization: "Q4_K_M",
         capabilities: &["Text", "Reasoning"],
         why_recommended: "The strongest dense Qwen reasoning model in the standard 32K shortlist tier.",
@@ -884,8 +914,6 @@ const LOCAL_MODEL_PROFILE_SPECS: [LocalModelProfileSpec; 14] = [
         aliases: &[],
         label: "Qwen 3.6 35B MLX",
         role: "Strong Apple-Silicon reasoning and coding",
-        recommendation_role: RecommendationRole::Reasoning,
-        quality_rank: 6,
         quantization: "NVFP4",
         capabilities: &["Text", "Vision", "Coding", "Reasoning"],
         why_recommended: "The preferred strong Apple-Silicon option once 48 GB unified memory comfortably covers a 32K chat.",
@@ -906,8 +934,6 @@ const LOCAL_MODEL_PROFILE_SPECS: [LocalModelProfileSpec; 14] = [
         aliases: &["glm-4.7-flash"],
         label: "GLM 4.7 Flash",
         role: "Coding and local agent specialist",
-        recommendation_role: RecommendationRole::Specialist,
-        quality_rank: 5,
         quantization: "Q4_K_M",
         capabilities: &["Text", "Coding", "Tools", "Agents"],
         why_recommended: "A strong local coding and agent specialist after a real 32K test on a compatible Ollama build.",
@@ -934,8 +960,6 @@ const LOCAL_MODEL_PROFILE_SPECS: [LocalModelProfileSpec; 14] = [
         aliases: &[],
         label: "Llama 3.3 70B",
         role: "Heavy general-purpose assistant",
-        recommendation_role: RecommendationRole::Reasoning,
-        quality_rank: 7,
         quantization: "Q4_K_M",
         capabilities: &["Text", "Reasoning", "Tools"],
         why_recommended: "A large multilingual general model, kept advanced until this exact 32K configuration passes a local test.",
@@ -962,8 +986,6 @@ const LOCAL_MODEL_PROFILE_SPECS: [LocalModelProfileSpec; 14] = [
         aliases: &[],
         label: "GPT-OSS 120B",
         role: "High-end reasoning and tools",
-        recommendation_role: RecommendationRole::Reasoning,
-        quality_rank: 8,
         quantization: "MXFP4",
         capabilities: &["Text", "Reasoning", "Tools", "Structured output"],
         why_recommended: "High-end reasoning, kept advanced until the exact 32K hardware plan is verified locally.",
@@ -990,8 +1012,6 @@ const LOCAL_MODEL_PROFILE_SPECS: [LocalModelProfileSpec; 14] = [
         aliases: &[],
         label: "Qwen 3 235B",
         role: "Workstation-scale reasoning",
-        recommendation_role: RecommendationRole::Reasoning,
-        quality_rank: 9,
         quantization: "Q4_K_M",
         capabilities: &["Text", "Reasoning", "Research"],
         why_recommended: "Workstation-scale reasoning, advanced until a real 32K test confirms this exact configuration.",
@@ -1073,6 +1093,65 @@ fn profile_from_spec(profile: LocalModelProfileSpec) -> LocalModelProfile {
             .map(|fit| fit.comfortable_gb)
             .unwrap_or_default(),
         maximum_context_tokens: Some(profile.maximum_context_tokens),
+        release_date: model_release_date(profile.id).map(str::to_owned),
+        license: model_license(profile.id).map(str::to_owned),
+        license_url: model_license_url(profile.id).map(str::to_owned),
+        source_url: model_source_url(profile.id).map(str::to_owned),
+        catalog_digest: model_catalog_digest(profile.id).map(str::to_owned),
+        reasoning_mode: model_reasoning_mode(profile.id).to_owned(),
+    }
+}
+
+fn model_release_date(model: &str) -> Option<&'static str> {
+    match normalized_model_id(model) {
+        FAST_ROUTER_MODEL => Some("2026-05-28"),
+        "gemma4:12b-mlx" => Some("2026-06-03"),
+        DEFAULT_LOCAL_MODEL => None,
+        _ => None,
+    }
+}
+
+fn model_license(model: &str) -> Option<&'static str> {
+    match normalized_model_id(model) {
+        FAST_ROUTER_MODEL => Some("LFM Open License 1.0"),
+        "gemma4:12b-mlx" => Some("Gemma Terms of Use"),
+        DEFAULT_LOCAL_MODEL => Some("Ollama artifact terms; verify upstream model licence"),
+        _ => None,
+    }
+}
+
+fn model_license_url(model: &str) -> Option<&'static str> {
+    match normalized_model_id(model) {
+        FAST_ROUTER_MODEL => Some("https://www.liquid.ai/lfm-license"),
+        "gemma4:12b-mlx" => Some("https://ai.google.dev/gemma/terms"),
+        _ => None,
+    }
+}
+
+fn model_source_url(model: &str) -> Option<&'static str> {
+    match normalized_model_id(model) {
+        FAST_ROUTER_MODEL => Some("https://ollama.com/library/lfm2.5/tags"),
+        "gemma4:12b-mlx" => Some("https://ollama.com/library/gemma4:12b-mlx"),
+        DEFAULT_LOCAL_MODEL => Some("https://ollama.com/library/qwen3.6:35b-mlx"),
+        _ => None,
+    }
+}
+
+fn model_catalog_digest(model: &str) -> Option<&'static str> {
+    match normalized_model_id(model) {
+        // Digest is pinned for the current Ollama LFM artifact; other entries
+        // remain visibly unverified until the local catalog resolves them.
+        FAST_ROUTER_MODEL => Some("9cf756159fc2"),
+        _ => None,
+    }
+}
+
+fn model_reasoning_mode(model: &str) -> &'static str {
+    match normalized_model_id(model) {
+        FAST_ROUTER_MODEL => "required",
+        "gemma4:12b-mlx" => "optional",
+        DEFAULT_LOCAL_MODEL => "optional",
+        _ => "none",
     }
 }
 
@@ -1260,14 +1339,6 @@ pub fn assess_local_model_fit(
     )
 }
 
-fn shortlist_quality_floor(capacity_gb: Option<u16>) -> u8 {
-    match capacity_gb.unwrap_or_default() {
-        0..=24 => 1,
-        25..=47 => 2,
-        _ => 3,
-    }
-}
-
 pub fn local_model_recommendations(
     hardware_profile: HardwareProfile,
     primary_capacity_gb: Option<u16>,
@@ -1275,7 +1346,6 @@ pub fn local_model_recommendations(
     setup: &LocalSetupSettings,
     installed_artifacts: &[LocalModelArtifact],
 ) -> Vec<LocalModelRecommendation> {
-    let quality_floor = shortlist_quality_floor(primary_capacity_gb);
     let mut recommendations = LOCAL_MODEL_PROFILE_SPECS
         .iter()
         .copied()
@@ -1310,40 +1380,19 @@ pub fn local_model_recommendations(
         })
         .collect::<Vec<_>>();
 
-    let ordered_roles = [
-        RecommendationRole::Fast,
-        RecommendationRole::Balanced,
-        RecommendationRole::Reasoning,
-        RecommendationRole::Specialist,
-    ];
-    let mut chosen_ids = Vec::<String>::new();
-    for role in ordered_roles {
-        let candidate = LOCAL_MODEL_PROFILE_SPECS
-            .iter()
-            .copied()
-            .filter(|spec| {
-                spec.recommendation_role == role
-                    && (role == RecommendationRole::Fast || spec.quality_rank >= quality_floor)
-            })
-            .filter(|spec| {
-                recommendations.iter().any(|recommendation| {
-                    recommendation.profile.id == spec.id
-                        && recommendation.fit.fit == LocalModelFit::Recommended
-                        && !recommendation.fit.requires_test
-                })
-            })
-            .max_by_key(|spec| spec.quality_rank);
-        if let Some(candidate) = candidate
-            && !chosen_ids.iter().any(|id| id == candidate.id)
-        {
-            chosen_ids.push(candidate.id.to_owned());
-        }
-    }
-    for (index, model) in chosen_ids.into_iter().take(4).enumerate() {
-        if let Some(recommendation) = recommendations
-            .iter_mut()
-            .find(|recommendation| recommendation.profile.id == model)
-        {
+    // The Manager shortlist is deliberately small and stable. A model can be
+    // shown here while it still needs an explicit real-runtime test (LFM and
+    // the premium model), but only if the conservative fit assessment says it
+    // is comfortable for the selected hardware and 32K target.
+    let preferred_ids = [FAST_ROUTER_MODEL, "gemma4:12b-mlx", DEFAULT_LOCAL_MODEL];
+    for (index, model) in preferred_ids.into_iter().enumerate() {
+        if let Some(recommendation) = recommendations.iter_mut().find(|recommendation| {
+            recommendation.profile.id == model
+                && recommendation.fit.fit == LocalModelFit::Recommended
+                && (model == FAST_ROUTER_MODEL
+                    || model == DEFAULT_LOCAL_MODEL
+                    || !recommendation.fit.requires_test)
+        }) {
             recommendation.default_recommended = true;
             recommendation.advanced_only = false;
             recommendation.recommendation_rank = Some(index as u8 + 1);
@@ -1873,12 +1922,12 @@ mod tests {
             false,
         );
         assert_eq!(fast.fit, LocalModelFit::Recommended);
-        assert!(!fast.requires_test);
+        assert!(fast.requires_test);
         let fast_json = serde_json::to_value(&fast).unwrap();
         assert_eq!(fast_json["fit"], "recommended");
         assert_eq!(fast_json["minimumMemoryGb"], 12);
         assert_eq!(fast_json["contextWindowTokens"], 32_768);
-        assert_eq!(fast_json["requiresTest"], false);
+        assert_eq!(fast_json["requiresTest"], true);
 
         let default_unsupported = assess_local_model_fit_for_hardware(
             DEFAULT_LOCAL_MODEL,
@@ -1913,7 +1962,7 @@ mod tests {
             FAST_ROUTER_MODEL,
             HardwareProfile::AppleUnified,
             Some(16),
-            65_536,
+            200_000,
             false,
         );
         assert_eq!(unsupported_context.fit, LocalModelFit::NotRecommended);
@@ -1947,6 +1996,14 @@ mod tests {
     #[test]
     fn catalog_covers_the_researched_memory_tiers() {
         let profiles = local_model_profiles();
+        assert!(profiles.iter().any(|profile| {
+            profile.id == FAST_ROUTER_MODEL
+                && profile.quantization == "Q4_K_M"
+                && profile.license.as_deref() == Some("LFM Open License 1.0")
+        }));
+        assert!(profiles.iter().any(|profile| {
+            profile.id == "gemma4:12b-mlx" && profile.package_size_bytes == Some(7_700_000_000)
+        }));
         assert!(profiles.iter().any(|profile| {
             profile.id == "gemma3:12b"
                 && profile.minimum_memory_gb == 20
@@ -1989,12 +2046,11 @@ mod tests {
                 .filter(|model| model.default_recommended)
                 .collect::<Vec<_>>();
             assert!(
-                defaults.len() <= 4,
-                "{budget} GB exposed more than four models"
+                defaults.len() <= 3,
+                "{budget} GB exposed more than three Manager models"
             );
             assert!(defaults.iter().all(|model| {
                 model.fit.fit == LocalModelFit::Recommended
-                    && !model.fit.requires_test
                     && model.fit.context_window_tokens == DEFAULT_CONTEXT_WINDOW_TOKENS
                     && model.fit.context_compatible == Some(true)
             }));
@@ -2038,8 +2094,8 @@ mod tests {
             .map(|model| model.profile.id.as_str())
             .collect::<Vec<_>>();
         assert!(apple_24_ids.contains(&FAST_ROUTER_MODEL));
-        assert!(apple_24_ids.contains(&"gemma3:12b"));
-        assert!(apple_24_ids.contains(&"qwen3:14b"));
+        assert!(apple_24_ids.contains(&"gemma4:12b-mlx"));
+        assert!(!apple_24_ids.contains(&"qwen3:14b"));
         assert!(!apple_24_ids.contains(&"gpt-oss:20b"));
 
         for budget in [32, 48, 64] {
@@ -2086,9 +2142,9 @@ mod tests {
             !model.default_recommended || model.profile.id != DEFAULT_LOCAL_MODEL
         }));
         assert!(
-            nvidia_24
-                .iter()
-                .any(|model| { model.default_recommended && model.profile.id == "gpt-oss:20b" })
+            nvidia_24.iter().any(|model| {
+                model.default_recommended && model.profile.id == FAST_ROUTER_MODEL
+            })
         );
         let cpu_16 = local_model_recommendations(
             HardwareProfile::CpuOnly,
@@ -2148,9 +2204,7 @@ mod tests {
             &[llama_artifact.clone()],
         );
         assert!(after.iter().any(|model| {
-            model.profile.id == "llama3.3:70b"
-                && model.default_recommended
-                && model.fit.verified_at_32k
+            model.profile.id == "llama3.3:70b" && model.advanced_only && model.fit.verified_at_32k
         }));
 
         let wrong_context = local_model_recommendations(
