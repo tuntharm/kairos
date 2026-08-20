@@ -6,6 +6,18 @@ use serde::{Deserialize, Serialize};
 
 const CHAT_ARCHIVE_VERSION: u32 = 1;
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoredSpecialistIdentity {
+    pub schema_version: u16,
+    pub specialist_id: String,
+    pub specialist_name: String,
+    pub release_id: String,
+    pub release_sha256: String,
+    pub evaluation_sha256: String,
+    pub evidence_boundary_sha256: String,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredChatMessage {
@@ -23,6 +35,8 @@ pub struct StoredChatMessage {
     pub provider_label: Option<String>,
     #[serde(default)]
     pub route_brain_ids: Vec<String>,
+    #[serde(default)]
+    pub specialist_identity: Option<StoredSpecialistIdentity>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -127,6 +141,7 @@ pub fn append_message(
     provider_id: Option<String>,
     provider_label: Option<String>,
     route_brain_ids: Vec<String>,
+    specialist_identity: Option<StoredSpecialistIdentity>,
 ) -> StoredChatMessage {
     let message = StoredChatMessage {
         id: unique_id("message"),
@@ -138,6 +153,7 @@ pub fn append_message(
         provider_id,
         provider_label,
         route_brain_ids,
+        specialist_identity,
     };
     session.messages.push(message.clone());
     session.updated_at = message.created_at.clone();
@@ -235,6 +251,15 @@ mod tests {
             None,
             None,
             Vec::new(),
+            Some(StoredSpecialistIdentity {
+                schema_version: 1,
+                specialist_id: "surrogate-experiment-reviewer".to_owned(),
+                specialist_name: "Surrogate Experiment Reviewer".to_owned(),
+                release_id: "release-001".to_owned(),
+                release_sha256: "a".repeat(64),
+                evaluation_sha256: "b".repeat(64),
+                evidence_boundary_sha256: "c".repeat(64),
+            }),
         );
         archive.sessions[0] = session;
         persist_chat_archive(&path, &archive).unwrap();
@@ -243,6 +268,13 @@ mod tests {
         assert_eq!(
             loaded.sessions[0].messages[0].attachment_names,
             ["draft.md"]
+        );
+        assert_eq!(
+            loaded.sessions[0].messages[0]
+                .specialist_identity
+                .as_ref()
+                .map(|identity| identity.release_id.as_str()),
+            Some("release-001")
         );
         fs::remove_dir_all(directory).unwrap();
     }

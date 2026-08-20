@@ -3,17 +3,27 @@ import { createSpecialistClient, SpecialistNativeError } from "./specialistClien
 
 describe("specialist native client", () => {
   it("uses the frozen command names and typed id arguments", async () => {
+    const digest = (character: string) => character.repeat(64);
     const trustedExecution = {
       schemaVersion: 1,
-      output: { decisionStatus: "working_hypothesis" },
+      output: {
+        assumptions: [],
+        decisionStatus: "working_hypothesis",
+        supportedFindings: [],
+        unsupportedClaims: [],
+        missingEvidence: [],
+        checkerResult: { presentFields: [], missingFields: [], conflictingFields: [] },
+        nextExperiment: { changedVariable: "stride", fixedControls: [], metric: "error", decisionRule: "lower", stopCondition: "one run" },
+        citations: [],
+      },
       identity: {
         schemaVersion: 1,
         specialistId: "surrogate-experiment-reviewer",
         specialistName: "Surrogate Experiment Reviewer",
         releaseId: "release-7",
-        releaseSha256: "release-sha",
-        evaluationSha256: "evaluation-sha",
-        evidenceBoundarySha256: "evidence-sha",
+        releaseSha256: digest("a"),
+        evaluationSha256: digest("b"),
+        evidenceBoundarySha256: digest("c"),
       },
     };
     const invoke = vi.fn(async (command: string) => command === "run_specialist" ? trustedExecution : []);
@@ -28,7 +38,7 @@ describe("specialist native client", () => {
       schemaVersion: 1 as const,
       specialistId: "surrogate-experiment-reviewer",
       input: "Review this result",
-      context: "Evidence IDs only",
+      sessionId: "chat-1",
     };
 
     await client.listSpecialists();
@@ -41,8 +51,8 @@ describe("specialist native client", () => {
     await client.cancelSpecialistRun("surrogate-experiment-reviewer", "run-3");
     await client.evaluateSpecialistCandidate("surrogate-experiment-reviewer", "candidate-4");
     await client.getSpecialistRelease("surrogate-experiment-reviewer", "release-7");
-    await client.activateSpecialistRelease("surrogate-experiment-reviewer", "release-7");
-    await client.rollbackSpecialistRelease("surrogate-experiment-reviewer");
+    await client.activateSpecialistRelease("surrogate-experiment-reviewer", "release-7", "release-6");
+    await client.rollbackSpecialistRelease("surrogate-experiment-reviewer", "release-7");
     await expect(client.runSpecialist(execution)).resolves.toEqual(trustedExecution);
 
     expect(invoke.mock.calls).toEqual([
@@ -56,8 +66,8 @@ describe("specialist native client", () => {
       ["cancel_specialist_run", { specialistId: "surrogate-experiment-reviewer", runId: "run-3" }],
       ["evaluate_specialist_candidate", { specialistId: "surrogate-experiment-reviewer", candidateId: "candidate-4" }],
       ["get_specialist_release", { specialistId: "surrogate-experiment-reviewer", releaseId: "release-7" }],
-      ["activate_specialist_release", { specialistId: "surrogate-experiment-reviewer", releaseId: "release-7" }],
-      ["rollback_specialist_release", { specialistId: "surrogate-experiment-reviewer" }],
+      ["activate_specialist_release", { specialistId: "surrogate-experiment-reviewer", releaseId: "release-7", expectedActiveReleaseId: "release-6" }],
+      ["rollback_specialist_release", { specialistId: "surrogate-experiment-reviewer", expectedActiveReleaseId: "release-7" }],
       ["run_specialist", { request: execution }],
     ]);
   });
@@ -90,7 +100,6 @@ describe("specialist native client", () => {
       schemaVersion: 1,
       specialistId: "surrogate-experiment-reviewer",
       input: "Review this result",
-      context: "Evidence IDs only",
     })).rejects.toMatchObject({
       kind: "failed",
       command: "run_specialist",

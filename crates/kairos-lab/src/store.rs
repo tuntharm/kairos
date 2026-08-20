@@ -102,6 +102,15 @@ impl PrivateLabStore {
         &self.root
     }
 
+    pub(crate) fn storage_root(&self) -> &Path {
+        &self.root
+    }
+
+    pub(crate) fn catalog_path_internal(&self) -> PathBuf {
+        // Keep the filename fixed; callers never provide storage paths.
+        self.root.join("catalog.json")
+    }
+
     pub fn prepare_dataset_storage(
         &self,
         dataset_id: &StableId,
@@ -345,7 +354,11 @@ fn validate_persisted_evaluation(root: &Path, release: &ReleaseManifestV1) -> Re
     Ok(())
 }
 
-fn write_file_atomic(root: &Path, destination: &Path, bytes: &[u8]) -> Result<(), LabError> {
+pub(crate) fn write_file_atomic(
+    root: &Path,
+    destination: &Path,
+    bytes: &[u8],
+) -> Result<(), LabError> {
     let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temporary = root.join(format!(".artifact.{}.{}.tmp", std::process::id(), sequence));
     let mut options = OpenOptions::new();
@@ -445,14 +458,14 @@ fn read_registry(path: &Path) -> Result<RegistryV1, LabError> {
     Ok(serde_json::from_slice(&fs::read(path)?)?)
 }
 
-struct RegistryLock {
+pub(crate) struct RegistryLock {
     path: PathBuf,
     file: File,
     nonce: String,
 }
 
 impl RegistryLock {
-    fn acquire(root: &Path) -> Result<Self, LabError> {
+    pub(crate) fn acquire(root: &Path) -> Result<Self, LabError> {
         Self::acquire_with_stale_after(root, LOCK_STALE_AFTER)
     }
 
@@ -555,7 +568,7 @@ fn ensure_private_child_tree(base: &Path, components: &[&str]) -> Result<PathBuf
     Ok(current)
 }
 
-fn reject_symlink(path: &Path) -> Result<(), LabError> {
+pub(crate) fn reject_symlink(path: &Path) -> Result<(), LabError> {
     if fs::symlink_metadata(path)?.file_type().is_symlink() {
         return Err(LabError::InvalidContract("symlink is not allowed"));
     }

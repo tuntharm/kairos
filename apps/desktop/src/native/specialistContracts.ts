@@ -14,16 +14,6 @@ export type SpecialistJobState =
   | "failed"
   | "cancelled"
   | "interrupted";
-export type CandidateState =
-  | "frozen"
-  | "evaluated"
-  | "eligible"
-  | "not_eligible"
-  | "inconclusive"
-  | "proposed"
-  | "activated"
-  | "rejected";
-
 export type MeasuredMetricV1 = {
   name: string;
   value: number | null;
@@ -53,7 +43,7 @@ export type SpecialistTestSummaryV1 = {
 export type SpecialistRunSummaryV1 = {
   schemaVersion: 1;
   runId: RunId;
-  kind: "baseline" | "training" | "evaluation";
+  kind: "synthetic_smoke" | "baseline" | "training" | "evaluation";
   state: SpecialistJobState;
   datasetId: DatasetId | null;
   candidateId: CandidateId | null;
@@ -78,24 +68,21 @@ export type ReleaseManifestV1 = {
   schemaVersion: 1;
   specialistId: SpecialistId;
   releaseId: ReleaseId;
-  candidateId: CandidateId;
-  candidateState: CandidateState;
-  baseModelSha256: string;
+  baseSha256: string;
   adapterSha256: string | null;
   instructionsSha256: string;
   sourceSha256: string;
   datasetSha256: string;
   toolSha256: string;
+  evaluationId: string;
   evaluationSha256: string;
-  evidenceBoundarySha256: string;
+  evaluatedBoundarySha256: string;
   readinessVerdict: "eligible" | "not_eligible" | "inconclusive";
   failureReason: string | null;
   activeReleaseId: ReleaseId | null;
   previousReleaseId: ReleaseId | null;
   createdAt: string;
   activatedAt: string | null;
-  evaluatedInput: string;
-  evaluatedContext: string;
 };
 
 export type SpecialistSummaryV1 = {
@@ -126,7 +113,30 @@ export type SpecialistExecutionRequestV1 = {
   schemaVersion: 1;
   specialistId: SpecialistId;
   input: string;
-  context: string;
+  sessionId?: string;
+};
+
+export type ExperimentContractCheckV1 = {
+  presentFields: string[];
+  missingFields: string[];
+  conflictingFields: string[];
+};
+
+export type ExperimentReviewV1 = {
+  assumptions: string[];
+  decisionStatus: "accepted" | "working_hypothesis" | "rejected" | "deferred" | "needs_supervision";
+  supportedFindings: Array<{ claim: string; evidenceIds: string[] }>;
+  unsupportedClaims: Array<{ claim: string; evidenceIds: string[] }>;
+  missingEvidence: string[];
+  checkerResult: ExperimentContractCheckV1;
+  nextExperiment: {
+    changedVariable: string;
+    fixedControls: string[];
+    metric: string;
+    decisionRule: string;
+    stopCondition: string;
+  };
+  citations: Array<{ evidenceId: string; claim: string }>;
 };
 
 export type SpecialistResponseIdentityV1 = {
@@ -141,6 +151,6 @@ export type SpecialistResponseIdentityV1 = {
 
 export type SpecialistExecutionV1 = {
   schemaVersion: 1;
-  output: unknown;
+  output: ExperimentReviewV1;
   identity: SpecialistResponseIdentityV1;
 };

@@ -1,3 +1,4 @@
+mod lab;
 mod storage;
 mod system;
 
@@ -1608,6 +1609,7 @@ fn store_chat_exchange(
         None,
         None,
         routes.clone(),
+        None,
     );
     storage::append_message(
         session,
@@ -1618,6 +1620,7 @@ fn store_chat_exchange(
         Some(provider.id.clone()),
         Some(provider.label.clone()),
         routes,
+        None,
     );
     let id = session.id.clone();
     storage::persist_chat_archive(&path, &archive)?;
@@ -2734,7 +2737,20 @@ pub fn run() {
             graph_snapshot,
             reveal_graph_node,
             draft_note_write,
-            confirm_note_write
+            confirm_note_write,
+            lab::list_specialists,
+            lab::get_specialist,
+            lab::create_specialist_draft,
+            lab::freeze_specialist_dataset,
+            lab::run_specialist_baseline,
+            lab::start_specialist_training,
+            lab::get_specialist_run,
+            lab::cancel_specialist_run,
+            lab::evaluate_specialist_candidate,
+            lab::get_specialist_release,
+            lab::activate_specialist_release,
+            lab::rollback_specialist_release,
+            lab::run_specialist
         ])
         .run(tauri::generate_context!())
         .expect("error while running Kairos");

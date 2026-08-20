@@ -16,7 +16,13 @@ import type {
 } from "./specialistContracts";
 
 export type NativeInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
-export type SpecialistNativeErrorKind = "unavailable" | "failed";
+export type SpecialistNativeErrorKind =
+  | "unavailable"
+  | "invalid_request"
+  | "not_found"
+  | "conflict"
+  | "manual_approval_required"
+  | "failed";
 
 export class SpecialistNativeError extends Error {
   readonly kind: SpecialistNativeErrorKind;
@@ -31,9 +37,21 @@ export class SpecialistNativeError extends Error {
 }
 
 function nativeError(command: string, reason: unknown): SpecialistNativeError {
-  const message = reason instanceof Error ? reason.message : String(reason);
+  const record = isRecord(reason) ? reason : undefined;
+  const typedKind = typeof record?.kind === "string" ? record.kind : undefined;
+  const knownKinds: SpecialistNativeErrorKind[] = ["unavailable", "invalid_request", "not_found", "conflict", "manual_approval_required", "failed"];
+  const message = typeof record?.message === "string"
+    ? record.message
+    : reason instanceof Error
+      ? reason.message
+      : String(reason);
   const unavailable = /(?:command|handler).*(?:not found|unknown)|not (?:installed|available)|unknown (?:command|handler)/i.test(message);
-  return new SpecialistNativeError(unavailable ? "unavailable" : "failed", command, message);
+  const kind = knownKinds.includes(typedKind as SpecialistNativeErrorKind)
+    ? typedKind as SpecialistNativeErrorKind
+    : unavailable
+      ? "unavailable"
+      : "failed";
+  return new SpecialistNativeError(kind, command, message);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -51,18 +69,26 @@ function parseRunSpecialistEnvelope(value: unknown, expectedSpecialistId: Specia
     "evaluationSha256",
     "evidenceBoundarySha256",
   ] as const;
+  const stableId = (candidate: unknown) => typeof candidate === "string" && /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(candidate);
+  const sha256 = (candidate: unknown) => typeof candidate === "string" && /^[a-f0-9]{64}$/.test(candidate);
   if (
     envelope?.schemaVersion !== 1
     || identity?.schemaVersion !== 1
     || !identityFields.every((field) => typeof identity[field] === "string" && identity[field].length > 0)
+    || !stableId(identity.specialistId)
+    || !stableId(identity.releaseId)
+    || !sha256(identity.releaseSha256)
+    || !sha256(identity.evaluationSha256)
+    || !sha256(identity.evidenceBoundarySha256)
     || identity.specialistId !== expectedSpecialistId
+    || !isRecord(envelope.output)
     || !("output" in envelope)
   ) {
     throw new SpecialistNativeError("failed", "run_specialist", "The native run_specialist response did not match SpecialistExecutionV1.");
   }
   return {
     schemaVersion: 1,
-    output: envelope.output,
+    output: envelope.output as SpecialistExecutionV1["output"],
     identity: {
       schemaVersion: 1,
       specialistId: identity.specialistId as string,
@@ -97,8 +123,8 @@ export function createSpecialistClient(invoke: NativeInvoke = (command, args) =>
     cancelSpecialistRun: (specialistId: SpecialistId, runId: RunId) => call<SpecialistRunSummaryV1>(invoke, "cancel_specialist_run", { specialistId, runId }),
     evaluateSpecialistCandidate: (specialistId: SpecialistId, candidateId: CandidateId) => call<SpecialistComparisonV1>(invoke, "evaluate_specialist_candidate", { specialistId, candidateId }),
     getSpecialistRelease: (specialistId: SpecialistId, releaseId: ReleaseId) => call<ReleaseManifestV1>(invoke, "get_specialist_release", { specialistId, releaseId }),
-    activateSpecialistRelease: (specialistId: SpecialistId, releaseId: ReleaseId) => call<ReleaseManifestV1>(invoke, "activate_specialist_release", { specialistId, releaseId }),
-    rollbackSpecialistRelease: (specialistId: SpecialistId) => call<ReleaseManifestV1>(invoke, "rollback_specialist_release", { specialistId }),
+    activateSpecialistRelease: (specialistId: SpecialistId, releaseId: ReleaseId, expectedActiveReleaseId: ReleaseId | null) => call<ReleaseManifestV1>(invoke, "activate_specialist_release", { specialistId, releaseId, expectedActiveReleaseId }),
+    rollbackSpecialistRelease: (specialistId: SpecialistId, expectedActiveReleaseId: ReleaseId) => call<ReleaseManifestV1>(invoke, "rollback_specialist_release", { specialistId, expectedActiveReleaseId }),
     runSpecialist: async (request: SpecialistExecutionRequestV1) => parseRunSpecialistEnvelope(await call<unknown>(invoke, "run_specialist", { request }), request.specialistId),
   };
 }

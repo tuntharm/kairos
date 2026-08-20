@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/kairos-core",
+  "crates/kairos-lab",
   "crates/kairos-cli",
   "crates/kairos-mcp",
   "apps/desktop/src-tauri",

@@ -1,5 +1,6 @@
 //! Private, provider-neutral Specialist Foundry domain engine.
 
+mod catalog;
 mod checker;
 mod dataset;
 mod error;
@@ -10,6 +11,7 @@ mod store;
 mod types;
 mod worker;
 
+pub use catalog::*;
 pub use checker::*;
 pub use dataset::*;
 pub use error::*;

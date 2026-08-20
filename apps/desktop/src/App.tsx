@@ -19,7 +19,7 @@ import {
 import { expandedWorkspace, type ViewId, type WorkspaceId } from "./appView";
 import { SpecialistResponseIdentity } from "./components/SpecialistResponseIdentity";
 import { SpecialistFoundry } from "./features/specialistFoundry/SpecialistFoundry";
-import type { SpecialistExecutionV1 } from "./native/specialistContracts";
+import type { SpecialistResponseIdentityV1 } from "./native/specialistContracts";
 
 import brandMark from "../../../design/assets/brand/kairos-mark-gradient.svg";
 import brandWordmark from "../../../design/assets/brand/kairos-wordmark-dark.svg";
@@ -247,7 +247,7 @@ type ChatMessage = {
   routes?: Array<{ id: string; name: string }>;
   citations?: Citation[];
   provider?: string;
-  specialistExecution?: SpecialistExecutionV1;
+  specialistIdentity?: SpecialistResponseIdentityV1;
   notice?: boolean;
 };
 
@@ -298,6 +298,7 @@ type StoredChatSession = ChatSessionSummary & {
     sourceIds?: string[];
     providerLabel?: string;
     routeBrainIds?: string[];
+    specialistIdentity?: SpecialistResponseIdentityV1;
   }>;
 };
 
@@ -1672,6 +1673,7 @@ export default function App() {
         provider: message.providerLabel,
         routes: (message.routeBrainIds ?? []).map((id) => ({ id, name: brainVisual(id).label })),
         citations: (message.sourceIds ?? []).map((id) => ({ id, brainId: id.split(":")[0] ?? "", relativePath: id.split(":").slice(1).join(":") })),
+        specialistIdentity: message.specialistIdentity,
       })) : defaultChatMessages());
     } catch (reason) {
       setCapabilityNotice(reason instanceof Error ? reason.message : "Kairos could not open that chat.");
@@ -2830,7 +2832,7 @@ export default function App() {
                       {message.citations.map((citation) => <CitationChip key={citation.id} citation={citation} />)}
                     </div>
                   ) : null}
-                  {message.specialistExecution && <SpecialistResponseIdentity identity={message.specialistExecution.identity} />}
+                  {message.specialistIdentity && <SpecialistResponseIdentity identity={message.specialistIdentity} />}
                 </article>
               ))}
               {streamingAssistant && (

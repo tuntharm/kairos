@@ -41,6 +41,7 @@ describe("Specialist Foundry presentation", () => {
   });
 
   it("exposes explicit activation and rollback controls only from recorded release state", () => {
+    const digest = (character: string) => character.repeat(64);
     const specialist = {
       schemaVersion: 1 as const,
       specialistId: "surrogate-experiment-reviewer",
@@ -56,24 +57,21 @@ describe("Specialist Foundry presentation", () => {
         schemaVersion: 1 as const,
         specialistId: "surrogate-experiment-reviewer",
         releaseId: "release-next",
-        candidateId: "candidate-4",
-        candidateState: "proposed" as const,
-        baseModelSha256: "base-sha",
-        adapterSha256: "adapter-sha",
-        instructionsSha256: "instructions-sha",
-        sourceSha256: "source-sha",
-        datasetSha256: "dataset-sha",
-        toolSha256: "tool-sha",
-        evaluationSha256: "evaluation-sha",
-        evidenceBoundarySha256: "evidence-sha",
+        baseSha256: digest("a"),
+        adapterSha256: digest("b"),
+        instructionsSha256: digest("c"),
+        sourceSha256: digest("d"),
+        datasetSha256: digest("e"),
+        toolSha256: digest("f"),
+        evaluationId: "evaluation-4",
+        evaluationSha256: digest("1"),
+        evaluatedBoundarySha256: digest("2"),
         readinessVerdict: "eligible" as const,
         failureReason: null,
         activeReleaseId: "release-active",
         previousReleaseId: "release-previous",
         createdAt: "2026-08-20T10:00:00Z",
         activatedAt: null,
-        evaluatedInput: "input-sha",
-        evaluatedContext: "context-sha",
       }],
     };
     const html = renderToStaticMarkup(<SpecialistFoundryView
@@ -86,7 +84,7 @@ describe("Specialist Foundry presentation", () => {
 
     expect(html).toContain("Activate release-next");
     expect(html).toContain("Roll back to release-previous");
-    expect(html).toContain("evidence-sha");
+    expect(html).toContain(digest("2"));
   });
 
   it("maps native lifecycle results to honest empty, ready, unavailable, and failed states", async () => {

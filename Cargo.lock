@@ -2190,6 +2190,7 @@ dependencies = [
  "chrono",
  "globset",
  "kairos-core",
+ "kairos-lab",
  "keyring",
  "serde",
  "serde_json",
@@ -2198,6 +2199,18 @@ dependencies = [
  "tauri-plugin-autostart",
  "tauri-plugin-dialog",
  "tauri-plugin-global-shortcut",
+]
+
+[[package]]
+name = "kairos-lab"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

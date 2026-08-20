@@ -69,12 +69,16 @@ export async function loadSpecialistFoundryState(client: SpecialistReadClient): 
   }
 }
 
-function StateNotice({ state }: { state: Exclude<SpecialistFoundryState, { status: "ready" }> }) {
+function StateNotice({ state, onCreateDraft, createBusy }: {
+  state: Exclude<SpecialistFoundryState, { status: "ready" }>;
+  onCreateDraft?: () => void;
+  createBusy?: boolean;
+}) {
   if (state.status === "loading") {
     return <div className="foundry-state" role="status"><strong>Loading specialist state…</strong><span>Reading private local manifests through Kairos.</span></div>;
   }
   if (state.status === "empty") {
-    return <div className="foundry-state" role="status"><strong>No specialists yet.</strong><span>The Lab will show a specialist only after a real local draft exists. Nothing is seeded or implied here.</span></div>;
+    return <div className="foundry-state" role="status"><strong>No specialists yet.</strong><span>Create the first private draft and validate Kairos’s 12 public synthetic fixtures. This does not read a brain, run a model, download anything, or train.</span>{onCreateDraft && <button className="primary-action" type="button" disabled={createBusy} onClick={onCreateDraft}>{createBusy ? "Creating local draft…" : "Create Surrogate Reviewer draft"}</button>}</div>;
   }
   return <div className={`foundry-state foundry-state--${state.status}`} role={state.status === "failed" ? "alert" : "status"}><strong>{state.status === "unavailable" ? "Specialist service unavailable" : "Specialist state failed to load"}</strong><span>{state.message}</span></div>;
 }
@@ -131,18 +135,18 @@ function ReleaseEvidence({ release, actionBusy, onActivateRelease }: {
   onActivateRelease?: (releaseId: string) => void;
 }) {
   const digests = [
-    ["Base model", release.baseModelSha256],
+    ["Base model", release.baseSha256],
     ["Adapter", release.adapterSha256],
     ["Instructions", release.instructionsSha256],
     ["Source", release.sourceSha256],
     ["Dataset", release.datasetSha256],
     ["Tool", release.toolSha256],
     ["Evaluation", release.evaluationSha256],
-    ["Evidence boundary", release.evidenceBoundarySha256],
+    ["Evidence boundary", release.evaluatedBoundarySha256],
   ];
   return (
     <article className="foundry-card foundry-release-card">
-      <div className="foundry-card__heading"><div><p className="section-label">Release evidence</p><h3>{release.releaseId}</h3></div><span className="foundry-state-chip">{release.candidateState.replaceAll("_", " ")}</span></div>
+      <div className="foundry-card__heading"><div><p className="section-label">Release evidence</p><h3>{release.releaseId}</h3></div><span className="foundry-state-chip">{release.activeReleaseId === release.releaseId ? "active" : release.readinessVerdict === "eligible" ? "approval ready" : release.readinessVerdict.replaceAll("_", " ")}</span></div>
       <dl className="foundry-release-summary">
         <div><dt>Readiness</dt><dd>{release.readinessVerdict.replaceAll("_", " ")}</dd></div>
         <div><dt>Active</dt><dd>{release.activeReleaseId === release.releaseId ? "Yes" : "No"}</dd></div>
@@ -151,7 +155,7 @@ function ReleaseEvidence({ release, actionBusy, onActivateRelease }: {
       </dl>
       {release.failureReason && <p className="foundry-failure-reason"><strong>Gate failure:</strong> {release.failureReason}</p>}
       <details><summary>Exact evidence identities</summary><dl className="foundry-digests">{digests.map(([label, digest]) => <div key={label}><dt>{label}</dt><dd>{digest ? <code>{digest}</code> : "Not recorded"}</dd></div>)}</dl></details>
-      {release.readinessVerdict === "eligible" && release.candidateState === "proposed" && release.activeReleaseId !== release.releaseId && onActivateRelease && <div className="foundry-release-actions"><button className="primary-action" type="button" disabled={actionBusy} onClick={() => onActivateRelease(release.releaseId)}>Activate {release.releaseId}</button><small>Native validation rechecks eligibility and stale state before the active pointer changes.</small></div>}
+      {release.readinessVerdict === "eligible" && release.activeReleaseId !== release.releaseId && onActivateRelease && <div className="foundry-release-actions"><button className="primary-action" type="button" disabled={actionBusy} onClick={() => onActivateRelease(release.releaseId)}>Activate {release.releaseId}</button><small>Native validation rechecks eligibility and the expected active release before the pointer changes.</small></div>}
     </article>
   );
 }
@@ -193,6 +197,8 @@ type SpecialistFoundryViewProps = {
   releaseActionState?: ReleaseActionState;
   onActivateRelease?: (releaseId: string) => void;
   onRollbackRelease?: () => void;
+  onCreateDraft?: () => void;
+  createBusy?: boolean;
 };
 
 export function SpecialistFoundryView({
@@ -204,6 +210,8 @@ export function SpecialistFoundryView({
   releaseActionState = { status: "idle" },
   onActivateRelease,
   onRollbackRelease,
+  onCreateDraft,
+  createBusy,
 }: SpecialistFoundryViewProps) {
   return (
     <div className="specialist-foundry">
@@ -214,7 +222,7 @@ export function SpecialistFoundryView({
         {onRefresh && <button className="text-action foundry-refresh" type="button" onClick={onRefresh} disabled={state.status === "loading"}>Refresh specialists</button>}
       </div>
       <section className="foundry-tab-panel" role="tabpanel" aria-live="polite">
-        {state.status === "ready" ? <ReadyTab tab={activeTab} state={state} actionState={releaseActionState} onActivateRelease={onActivateRelease} onRollbackRelease={onRollbackRelease} /> : <StateNotice state={state} />}
+        {state.status === "ready" ? <ReadyTab tab={activeTab} state={state} actionState={releaseActionState} onActivateRelease={onActivateRelease} onRollbackRelease={onRollbackRelease} /> : <StateNotice state={state} onCreateDraft={onCreateDraft} createBusy={createBusy} />}
       </section>
       {activeTab === "specialists" && runtimeSetup && (
         <section className="foundry-runtime-setup" aria-label="Local model setup">
@@ -238,6 +246,7 @@ export function SpecialistFoundry({ nativeAvailable, runtimeSetup, client }: Spe
   const [state, setState] = useState<SpecialistFoundryState>({ status: "loading" });
   const [loadVersion, setLoadVersion] = useState(0);
   const [releaseActionState, setReleaseActionState] = useState<ReleaseActionState>({ status: "idle" });
+  const [createBusy, setCreateBusy] = useState(false);
 
   useEffect(() => {
     let current = true;
@@ -258,7 +267,7 @@ export function SpecialistFoundry({ nativeAvailable, runtimeSetup, client }: Spe
     if (!window.confirm(`Activate exact release ${releaseId} for ${specialistId}? This atomically changes the release used by Specialist Chat. It does not train, download, or switch the manager model. Kairos will recheck eligibility and current registry state.`)) return;
     setReleaseActionState({ status: "working", message: `Activating ${releaseId}…` });
     try {
-      await specialistClient.activateSpecialistRelease(specialistId, releaseId);
+      await specialistClient.activateSpecialistRelease(specialistId, releaseId, state.selected.activeReleaseId);
       setReleaseActionState({ status: "succeeded", message: `${releaseId} was activated and will be re-read from the registry.` });
       setLoadVersion((version) => version + 1);
     } catch (reason) {
@@ -272,11 +281,30 @@ export function SpecialistFoundry({ nativeAvailable, runtimeSetup, client }: Spe
     if (!window.confirm(`Roll back ${specialistId} from ${activeReleaseId ?? "the active release"} to recorded release ${previousReleaseId}? This atomically changes the release used by Specialist Chat and preserves both release records.`)) return;
     setReleaseActionState({ status: "working", message: `Rolling back to ${previousReleaseId}…` });
     try {
-      await specialistClient.rollbackSpecialistRelease(specialistId);
+      if (!activeReleaseId) throw new Error("The active release changed. Refresh Specialist Lab before rolling back.");
+      await specialistClient.rollbackSpecialistRelease(specialistId, activeReleaseId);
       setReleaseActionState({ status: "succeeded", message: `Rollback to ${previousReleaseId} completed and will be re-read from the registry.` });
       setLoadVersion((version) => version + 1);
     } catch (reason) {
       setReleaseActionState({ status: "failed", message: reason instanceof Error ? reason.message : `Rollback to ${previousReleaseId} failed.` });
+    }
+  };
+
+  const createFirstDraft = async () => {
+    setCreateBusy(true);
+    setReleaseActionState({ status: "idle" });
+    try {
+      await specialistClient.createSpecialistDraft({
+        schemaVersion: 1,
+        specialistId: "surrogate-experiment-reviewer",
+        name: "Surrogate Experiment Reviewer",
+        purpose: "Distinguish supported experiment findings from overclaim, identify missing evidence, and propose one controlled next experiment with citations.",
+      });
+      setLoadVersion((version) => version + 1);
+    } catch (reason) {
+      setState(failureMessage(reason));
+    } finally {
+      setCreateBusy(false);
     }
   };
 
@@ -289,5 +317,7 @@ export function SpecialistFoundry({ nativeAvailable, runtimeSetup, client }: Spe
     releaseActionState={releaseActionState}
     onActivateRelease={(releaseId) => void activateRelease(releaseId)}
     onRollbackRelease={() => void rollbackRelease()}
+    onCreateDraft={() => void createFirstDraft()}
+    createBusy={createBusy}
   />;
 }
