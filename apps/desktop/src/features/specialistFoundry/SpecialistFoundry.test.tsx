@@ -25,6 +25,20 @@ describe("Specialist Foundry presentation", () => {
     expect(html).toContain("Ollama setup stays here");
   });
 
+  it("offers an explicit no-model draft action only in the empty native state", () => {
+    const html = renderToStaticMarkup(
+      <SpecialistFoundryView
+        activeTab="specialists"
+        onTabChange={() => undefined}
+        state={{ status: "empty" }}
+        onCreateDraft={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Create Surrogate Reviewer draft");
+    expect(html).toContain("does not read a brain, run a model, download anything, or train");
+  });
+
   it("distinguishes loading, unavailable, and failed states", () => {
     const render = (state: Parameters<typeof SpecialistFoundryView>[0]["state"]) => renderToStaticMarkup(
       <SpecialistFoundryView activeTab="runs" onTabChange={() => undefined} state={state} />,

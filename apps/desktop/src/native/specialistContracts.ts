@@ -112,6 +112,7 @@ export type SpecialistDraftRequestV1 = {
 export type SpecialistExecutionRequestV1 = {
   schemaVersion: 1;
   specialistId: SpecialistId;
+  releaseId: ReleaseId;
   input: string;
   sessionId?: string;
 };

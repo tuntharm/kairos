@@ -1151,19 +1151,20 @@ fn mask_link_spans(markdown: &str) -> String {
                 continue;
             }
         }
-        if bytes[index] == b'[' && !markdown[index..].starts_with("[[") {
-            if let Some(label_end_offset) = markdown[index + 1..].find("](") {
-                let target_start = index + 1 + label_end_offset + 2;
-                if let Some(target_end_offset) = markdown[target_start..].find(')') {
-                    let end = target_start + target_end_offset + 1;
-                    for byte in &mut output[index..end] {
-                        if *byte != b'\n' {
-                            *byte = b' ';
-                        }
+        if bytes[index] == b'['
+            && !markdown[index..].starts_with("[[")
+            && let Some(label_end_offset) = markdown[index + 1..].find("](")
+        {
+            let target_start = index + 1 + label_end_offset + 2;
+            if let Some(target_end_offset) = markdown[target_start..].find(')') {
+                let end = target_start + target_end_offset + 1;
+                for byte in &mut output[index..end] {
+                    if *byte != b'\n' {
+                        *byte = b' ';
                     }
-                    index = end;
-                    continue;
                 }
+                index = end;
+                continue;
             }
         }
         index += char_width(bytes[index]);
@@ -1553,7 +1554,7 @@ mod tests {
         let temp = TempDir::new("freshness");
         temp.write("Note.md", "# ordinary note");
         let source = source(&temp, &["Note.md"]);
-        let index = build_graph_index(&[source.clone()], GraphBuildOptions::default());
+        let index = build_graph_index(std::slice::from_ref(&source), GraphBuildOptions::default());
         fs::remove_file(temp.path.join("Note.md")).unwrap();
 
         let diagnostics = graph_freshness(&index, &[source]);

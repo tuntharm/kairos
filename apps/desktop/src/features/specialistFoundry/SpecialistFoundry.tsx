@@ -238,9 +238,10 @@ type SpecialistFoundryProps = {
   nativeAvailable: boolean;
   runtimeSetup?: ReactNode;
   client?: SpecialistClient;
+  onCatalogChanged?: () => void;
 };
 
-export function SpecialistFoundry({ nativeAvailable, runtimeSetup, client }: SpecialistFoundryProps) {
+export function SpecialistFoundry({ nativeAvailable, runtimeSetup, client, onCatalogChanged }: SpecialistFoundryProps) {
   const specialistClient = useMemo(() => client ?? createSpecialistClient(), [client]);
   const [activeTab, setActiveTab] = useState<SpecialistFoundryTab>("specialists");
   const [state, setState] = useState<SpecialistFoundryState>({ status: "loading" });
@@ -268,6 +269,7 @@ export function SpecialistFoundry({ nativeAvailable, runtimeSetup, client }: Spe
     setReleaseActionState({ status: "working", message: `Activating ${releaseId}…` });
     try {
       await specialistClient.activateSpecialistRelease(specialistId, releaseId, state.selected.activeReleaseId);
+      onCatalogChanged?.();
       setReleaseActionState({ status: "succeeded", message: `${releaseId} was activated and will be re-read from the registry.` });
       setLoadVersion((version) => version + 1);
     } catch (reason) {
@@ -283,6 +285,7 @@ export function SpecialistFoundry({ nativeAvailable, runtimeSetup, client }: Spe
     try {
       if (!activeReleaseId) throw new Error("The active release changed. Refresh Specialist Lab before rolling back.");
       await specialistClient.rollbackSpecialistRelease(specialistId, activeReleaseId);
+      onCatalogChanged?.();
       setReleaseActionState({ status: "succeeded", message: `Rollback to ${previousReleaseId} completed and will be re-read from the registry.` });
       setLoadVersion((version) => version + 1);
     } catch (reason) {
@@ -300,6 +303,7 @@ export function SpecialistFoundry({ nativeAvailable, runtimeSetup, client }: Spe
         name: "Surrogate Experiment Reviewer",
         purpose: "Distinguish supported experiment findings from overclaim, identify missing evidence, and propose one controlled next experiment with citations.",
       });
+      onCatalogChanged?.();
       setLoadVersion((version) => version + 1);
     } catch (reason) {
       setState(failureMessage(reason));

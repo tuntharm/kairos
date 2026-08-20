@@ -17,9 +17,16 @@ import {
   type AtlasPhysicsController,
 } from "./atlasPhysics";
 import { expandedWorkspace, type ViewId, type WorkspaceId } from "./appView";
+import { hydrateStoredChatMessage, type StoredChatMessageV1 } from "./chatHistory";
+import { resolveChatDelivery, type ChatTarget } from "./chatTarget";
 import { SpecialistResponseIdentity } from "./components/SpecialistResponseIdentity";
 import { SpecialistFoundry } from "./features/specialistFoundry/SpecialistFoundry";
-import type { SpecialistResponseIdentityV1 } from "./native/specialistContracts";
+import { createSpecialistClient } from "./native/specialistClient";
+import type {
+  ExperimentReviewV1,
+  SpecialistResponseIdentityV1,
+  SpecialistSummaryV1,
+} from "./native/specialistContracts";
 
 import brandMark from "../../../design/assets/brand/kairos-mark-gradient.svg";
 import brandWordmark from "../../../design/assets/brand/kairos-wordmark-dark.svg";
@@ -290,16 +297,7 @@ type ChatSessionSummary = {
 };
 
 type StoredChatSession = ChatSessionSummary & {
-  messages: Array<{
-    id: string;
-    role: "user" | "assistant";
-    content: string;
-    createdAt: string;
-    sourceIds?: string[];
-    providerLabel?: string;
-    routeBrainIds?: string[];
-    specialistIdentity?: SpecialistResponseIdentityV1;
-  }>;
+  messages: StoredChatMessageV1[];
 };
 
 type ProviderId = "ollama" | "openai" | "anthropic" | "codex-cli" | "claude-cli";
@@ -326,6 +324,23 @@ const graphFitScaleMin = 0.12;
 const graphZoomMax = 3;
 const graphManualLayoutStorageKey = "kairos.graph-manual-layout.v2";
 const maxLiveAtlasPhysicsNodes = 500;
+
+function specialistReviewBody(review: ExperimentReviewV1): string {
+  const supported = review.supportedFindings.length
+    ? review.supportedFindings.map((finding) => `- ${finding.claim}`).join("\n")
+    : "- No supported finding was established.";
+  const unsupported = review.unsupportedClaims.length
+    ? review.unsupportedClaims.map((finding) => `- ${finding.claim}`).join("\n")
+    : "- No unsupported claim was identified.";
+  return [
+    `Decision: ${review.decisionStatus.replaceAll("_", " ")}`,
+    `Supported findings\n${supported}`,
+    `Unsupported claims\n${unsupported}`,
+    `Next experiment: change ${review.nextExperiment.changedVariable}; measure ${review.nextExperiment.metric}.`,
+    `Decision rule: ${review.nextExperiment.decisionRule}`,
+    `Stop condition: ${review.nextExperiment.stopCondition}`,
+  ].join("\n\n");
+}
 
 const browserPreviewStatus: AppStatus = {
   configPath: "Browser preview",
@@ -1080,6 +1095,7 @@ function AtlasCanvas({ nodes, edges, positions, width, height, camera, selectedN
 
 export default function App() {
   const nativeRuntime = hasNativeBridge();
+  const specialistClient = useMemo(() => createSpecialistClient(), []);
   const [status, setStatus] = useState<AppStatus | null>(() => nativeRuntime ? null : browserPreviewStatus);
   const [localSetup, setLocalSetup] = useState<LocalSetupStatus | null>(() => nativeRuntime ? null : browserPreviewSetup);
   const [view, setView] = useState<ViewId>("chat");
@@ -1097,6 +1113,8 @@ export default function App() {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
   const [providerId, setProviderId] = useState<ProviderId>("ollama");
+  const [chatTarget, setChatTarget] = useState<ChatTarget>("manager");
+  const [specialists, setSpecialists] = useState<SpecialistSummaryV1[]>([]);
   const [kairosConsentMode, setKairosConsentMode] = useState<KairosConsentMode>("ask");
   const [scopedExecutionGrant, setScopedExecutionGrant] = useState<ScopedExecutionGrant | null>(null);
   const [brainOverride, setBrainOverride] = useState("auto");
@@ -1206,10 +1224,22 @@ export default function App() {
     && (localSetup?.memoryBudgetMode !== "custom" || localSetup?.memoryBudgetGb !== customMemoryBudgetValue);
   const selectedModelFit = localSetup?.selectedModelFit ?? status?.model.selectedModelFit;
   const modelReady = Boolean(status?.initialized && ollamaRunning && selectedModelInstalled);
-  const chatCanSend = Boolean(composer.trim()) && !busy && (activeProvider.external || modelReady);
-  const composerProviderDetail = !activeProvider.external && !modelReady
-    ? (localSetup?.setupMessage ?? status?.model.setupMessage ?? "Select and download a ready local model before sending.")
-    : activeProvider.detail;
+  const activeSpecialists = specialists.filter((specialist) => specialist.activeReleaseId);
+  const chatDelivery = resolveChatDelivery(chatTarget, specialists, activeProvider.external);
+  const selectedSpecialist = chatDelivery.specialist;
+  const specialistMode = chatDelivery.kind === "specialist_local" || chatDelivery.kind === "specialist_unavailable";
+  const chatCanSend = Boolean(composer.trim()) && !busy && (
+    chatDelivery.kind === "specialist_local"
+    || chatDelivery.kind === "manager_external"
+    || (chatDelivery.kind === "manager_local" && modelReady)
+  );
+  const composerProviderDetail = chatDelivery.kind === "specialist_local"
+    ? `${chatDelivery.specialist.name} · active release ${chatDelivery.specialist.activeReleaseId}`
+    : chatDelivery.kind === "specialist_unavailable"
+      ? "Selected specialist is no longer active. Choose Kairos Manager explicitly or refresh Local AI Lab."
+      : !activeProvider.external && !modelReady
+        ? (localSetup?.setupMessage ?? status?.model.setupMessage ?? "Select and download a ready local model before sending.")
+        : activeProvider.detail;
   const selectedBrain = brains.find((brain) => brain.id === brainOverride);
   const writableBrains = brains.filter(canConfirmWrites);
   const graphNode = graph.nodes.find((node) => node.id === selectedGraphNode);
@@ -1348,6 +1378,18 @@ export default function App() {
     }
   };
 
+  const refreshSpecialists = async () => {
+    if (!nativeRuntime) return;
+    try {
+      const next = await specialistClient.listSpecialists();
+      setSpecialists(next);
+    } catch {
+      // Foundry owns the detailed native error. Chat only presents targets
+      // backed by an active persisted release.
+      setSpecialists([]);
+    }
+  };
+
   const refreshStatus = async () => {
     if (!nativeRuntime) {
       setStatus(browserPreviewStatus);
@@ -1435,6 +1477,7 @@ export default function App() {
 
   useEffect(() => {
     void refreshStatus();
+    void refreshSpecialists();
   }, []);
 
   useEffect(() => {
@@ -1665,16 +1708,9 @@ export default function App() {
       const session = await invoke<StoredChatSession>("load_chat_session", { sessionId });
       setChatSessionId(session.id);
       setHistoryOpen(false);
-      setChatMessages(session.messages.length ? session.messages.map((message) => ({
-        id: message.id,
-        role: message.role,
-        body: message.content,
-        createdAt: message.createdAt,
-        provider: message.providerLabel,
-        routes: (message.routeBrainIds ?? []).map((id) => ({ id, name: brainVisual(id).label })),
-        citations: (message.sourceIds ?? []).map((id) => ({ id, brainId: id.split(":")[0] ?? "", relativePath: id.split(":").slice(1).join(":") })),
-        specialistIdentity: message.specialistIdentity,
-      })) : defaultChatMessages());
+      setChatMessages(session.messages.length
+        ? session.messages.map((message) => hydrateStoredChatMessage(message, (id) => brainVisual(id).label))
+        : defaultChatMessages());
     } catch (reason) {
       setCapabilityNotice(reason instanceof Error ? reason.message : "Kairos could not open that chat.");
     }
@@ -1901,17 +1937,36 @@ export default function App() {
   const submitChat = async (confirmedExternal = false) => {
     const message = chatPreview?.message ?? composer.trim();
     if (!message || busy) return;
-    if (!activeProvider.external && !modelReady) {
+    if (chatDelivery.kind === "specialist_unavailable") {
+      setError("The selected specialist is no longer active. Choose Kairos Manager explicitly or refresh Local AI Lab. Nothing was sent or run.");
+      return;
+    }
+    if (specialistMode && attachments.length > 0) {
+      setError("Active specialists use only their approved release sources. Remove ad hoc attachments before running this specialist.");
+      return;
+    }
+    if (!specialistMode && !activeProvider.external && !modelReady) {
       setError(localSetup?.setupMessage ?? status?.model.setupMessage ?? "The selected local model is not ready. Kairos did not switch models.");
       return;
     }
-    if (activeProvider.external && !confirmedExternal) {
+    if (!specialistMode && activeProvider.external && !confirmedExternal) {
       await previewExternalTurn(message);
       return;
     }
     let effectiveSessionId = chatSessionId;
     let executionGrant: string | undefined;
-    if (kairosConsentMode === "full_kairos") {
+    if (specialistMode && !effectiveSessionId) {
+      if (!nativeRuntime) return;
+      try {
+        const session = await invoke<StoredChatSession>("create_chat_session");
+        effectiveSessionId = session.id;
+        setChatSessionId(session.id);
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : "Kairos could not create the local specialist chat session.");
+        return;
+      }
+    }
+    if (!specialistMode && kairosConsentMode === "full_kairos") {
       if (!nativeRuntime) {
         setCapabilityNotice("Scoped full access is available in the native Kairos app.");
         return;
@@ -1949,7 +2004,7 @@ export default function App() {
         return;
       }
     }
-    const turnId = activeProvider.id === "ollama" ? makeId("turn") : undefined;
+    const turnId = !specialistMode && activeProvider.id === "ollama" ? makeId("turn") : undefined;
     setBusy(true);
     setError(null);
     if (turnId) {
@@ -1960,7 +2015,7 @@ export default function App() {
       role: "user",
       body: message,
       createdAt: new Date().toISOString(),
-      routes: selectedBrain ? [{ id: selectedBrain.id, name: selectedBrain.name }] : undefined,
+      routes: specialistMode ? undefined : selectedBrain ? [{ id: selectedBrain.id, name: selectedBrain.name }] : undefined,
     };
     setChatMessages((messages) => [...messages, userMessage]);
     setComposer("");
@@ -1970,6 +2025,25 @@ export default function App() {
         .filter((chat) => chat.role === "user" || chat.role === "assistant")
         .slice(-8)
         .map((chat) => ({ role: chat.role, content: chat.body }));
+      if (selectedSpecialist) {
+        const execution = await specialistClient.runSpecialist({
+          schemaVersion: 1,
+          specialistId: selectedSpecialist.specialistId,
+          releaseId: selectedSpecialist.activeReleaseId!,
+          input: message,
+          sessionId: effectiveSessionId ?? undefined,
+        });
+        setChatMessages((messages) => [...messages, {
+          id: makeId("assistant"),
+          role: "assistant",
+          body: specialistReviewBody(execution.output),
+          createdAt: new Date().toISOString(),
+          provider: `${selectedSpecialist.name} · local specialist`,
+          specialistIdentity: execution.identity,
+        }]);
+        await refreshChatSessions("");
+        return;
+      }
       const result = await callFeature<unknown>(
       "chat_with_provider",
       {
@@ -1998,6 +2072,8 @@ export default function App() {
         await refreshChatSessions("");
       }
       setChatMessages((messages) => [...messages, messageFromResult(result, fallback)]);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "The active specialist could not run. Kairos did not fall back to another model.");
     } finally {
       if (turnId) {
         setStreamingAssistant((current) => current?.turnId === turnId ? null : current);
@@ -2771,8 +2847,8 @@ export default function App() {
                 <h1>{expanded ? "Ask from the right context." : "What matters now?"}</h1>
               </div>
               <div className="chat-heading__actions">
-                <StatusPill tone={activeProvider.external ? "warning" : "local"}>
-                  {activeProvider.external ? "PREVIEW FIRST" : "LOCAL"}
+                <StatusPill tone={chatDelivery.kind === "manager_external" || chatDelivery.kind === "specialist_unavailable" ? "warning" : "local"}>
+                  {chatDelivery.badge}
                 </StatusPill>
                 <button className="text-action chat-history-trigger" type="button" onClick={toggleHistory} aria-expanded={historyOpen} aria-controls="chat-history">History</button>
               </div>
@@ -2807,7 +2883,7 @@ export default function App() {
                     setBrainOverride(event.target.value);
                     if (chatPreview) setChatPreview(null);
                   }}
-                  disabled={busy || Boolean(chatPreview)}
+                  disabled={busy || Boolean(chatPreview) || specialistMode}
                 >
                   <option value="auto">Auto-route</option>
                   {brains.filter((brain) => brain.enabled !== false).map((brain) => (
@@ -2846,7 +2922,7 @@ export default function App() {
               {busy && !streamingAssistant && (
                 <article className="chat-message chat-message--assistant is-loading">
                   <KairosLoader />
-                  <span>{activeProvider.external ? "Preparing your reviewed handoff…" : "Routing approved local context…"}</span>
+                  <span>{chatDelivery.kind === "specialist_local" ? "Running the exact active local specialist release…" : chatDelivery.kind === "manager_external" ? "Preparing your reviewed handoff…" : "Routing approved local context…"}</span>
                 </article>
               )}
             </div>
@@ -2925,24 +3001,40 @@ export default function App() {
                   onClick={() => void pickTemporaryAttachments()}
                   title="Attach up to five temporary files for this turn"
                   aria-label="Attach temporary files"
-                  disabled={busy}
+                  disabled={busy || specialistMode}
                 >
                   <span aria-hidden="true">＋</span>
                 </button>
-                <label className="composer-select composer-select--consent" title={activeKairosConsentMode.detail}>
-                  <span className="composer-select__icon" aria-hidden="true">✋</span>
-                  <span className="sr-only">Kairos execution and consent mode</span>
-                  <select value={kairosConsentMode} onChange={(event) => setKairosConsentMode(event.target.value as KairosConsentMode)} aria-label="Kairos execution and consent mode" disabled={busy}>
-                    {kairosConsentModes.map((mode) => <option key={mode.id} value={mode.id}>{mode.label}</option>)}
+                <label className="composer-select composer-select--target">
+                  <span className="sr-only">Chat target</span>
+                  <select value={chatTarget} onChange={(event) => {
+                    setChatTarget(event.target.value as ChatTarget);
+                    setChatPreview(null);
+                    setError(null);
+                  }} aria-label="Chat target" disabled={busy}>
+                    <option value="manager">Kairos Manager</option>
+                    {chatDelivery.kind === "specialist_unavailable" && <option value={chatTarget}>Selected specialist (unavailable)</option>}
+                    {activeSpecialists.map((specialist) => <option key={specialist.specialistId} value={`specialist:${specialist.specialistId}`}>{specialist.name}</option>)}
                   </select>
                 </label>
-                <label className="composer-select">
-                  <span className="sr-only">Provider</span>
-                  <select value={providerId} onChange={(event) => setProviderId(event.target.value as ProviderId)} aria-label="Provider" disabled={busy || Boolean(chatPreview)}>
-                    {providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
-                  </select>
-                </label>
-                {providerId === "ollama" && (
+                {!specialistMode && (
+                  <label className="composer-select composer-select--consent" title={activeKairosConsentMode.detail}>
+                    <span className="composer-select__icon" aria-hidden="true">✋</span>
+                    <span className="sr-only">Kairos execution and consent mode</span>
+                    <select value={kairosConsentMode} onChange={(event) => setKairosConsentMode(event.target.value as KairosConsentMode)} aria-label="Kairos execution and consent mode" disabled={busy}>
+                      {kairosConsentModes.map((mode) => <option key={mode.id} value={mode.id}>{mode.label}</option>)}
+                    </select>
+                  </label>
+                )}
+                {!specialistMode && (
+                  <label className="composer-select">
+                    <span className="sr-only">Provider</span>
+                    <select value={providerId} onChange={(event) => setProviderId(event.target.value as ProviderId)} aria-label="Provider" disabled={busy || Boolean(chatPreview)}>
+                      {providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)}
+                    </select>
+                  </label>
+                )}
+                {!specialistMode && providerId === "ollama" && (
                   <label className="composer-select composer-select--model">
                     <span className="sr-only">Ollama model</span>
                     <select
@@ -2963,15 +3055,15 @@ export default function App() {
                   type="submit"
                   className="composer-send-button"
                   disabled={!chatCanSend}
-                  aria-label={activeProvider.external ? "Preview external message" : "Send local message"}
-                  title={activeProvider.external ? "Review before sending" : "Send local message"}
+                  aria-label={specialistMode ? "Run active specialist" : activeProvider.external ? "Preview external message" : "Send local message"}
+                  title={specialistMode ? "Run the exact active local specialist release" : activeProvider.external ? "Review before sending" : "Send local message"}
                 >
                   <span aria-hidden="true">↑</span>
-                  <span className="sr-only">{activeProvider.external ? "Preview" : "Send"}</span>
+                  <span className="sr-only">{specialistMode ? "Run specialist" : activeProvider.external ? "Preview" : "Send"}</span>
                 </button>
               </div>
               <p className="composer-consent-note">
-                {activeKairosConsentMode.detail} Cloud, API, and CLI turns always show a review before sending; note writes always require a diff confirmation.
+                {specialistMode ? "The active specialist uses only its recorded local release and approved evidence boundary. No provider fallback is allowed." : `${activeKairosConsentMode.detail} Cloud, API, and CLI turns always show a review before sending; note writes always require a diff confirmation.`}
               </p>
               {attachmentNotice && <p className="attachment-notice">{attachmentNotice}</p>}
             </form>
@@ -3182,7 +3274,12 @@ export default function App() {
                 <button className="secondary-action" type="button" onClick={() => void refreshStatus()}>Refresh runtime</button>
               </div>
             </div>
-            <SpecialistFoundry nativeAvailable={nativeRuntime} runtimeSetup={localModelSetup} />
+            <SpecialistFoundry
+              nativeAvailable={nativeRuntime}
+              runtimeSetup={localModelSetup}
+              client={specialistClient}
+              onCatalogChanged={() => void refreshSpecialists()}
+            />
           </section>
         )}
 

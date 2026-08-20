@@ -2201,7 +2201,7 @@ mod tests {
             Some(96),
             DEFAULT_CONTEXT_WINDOW_TOKENS,
             &setup,
-            &[llama_artifact.clone()],
+            std::slice::from_ref(&llama_artifact),
         );
         assert!(after.iter().any(|model| {
             model.profile.id == "llama3.3:70b" && model.advanced_only && model.fit.verified_at_32k
@@ -2212,7 +2212,7 @@ mod tests {
             Some(96),
             65_536,
             &setup,
-            &[llama_artifact.clone()],
+            std::slice::from_ref(&llama_artifact),
         );
         assert!(
             wrong_context
@@ -2224,7 +2224,7 @@ mod tests {
             Some(96),
             DEFAULT_CONTEXT_WINDOW_TOKENS,
             &setup,
-            &[llama_artifact.clone()],
+            std::slice::from_ref(&llama_artifact),
         );
         assert!(
             wrong_hardware
@@ -2248,7 +2248,7 @@ mod tests {
             Some(96),
             DEFAULT_CONTEXT_WINDOW_TOKENS,
             &wrong_quantization_setup,
-            &[llama_artifact.clone()],
+            std::slice::from_ref(&llama_artifact),
         );
         assert!(wrong_quantization.iter().any(|model| {
             model.profile.id == "llama3.3:70b" && model.advanced_only && model.fit.requires_test

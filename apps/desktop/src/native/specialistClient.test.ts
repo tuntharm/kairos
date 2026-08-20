@@ -37,6 +37,7 @@ describe("specialist native client", () => {
     const execution = {
       schemaVersion: 1 as const,
       specialistId: "surrogate-experiment-reviewer",
+      releaseId: "release-7",
       input: "Review this result",
       sessionId: "chat-1",
     };
@@ -82,6 +83,24 @@ describe("specialist native client", () => {
     } satisfies Partial<SpecialistNativeError>);
   });
 
+  it("preserves typed native approval errors and their safe message", async () => {
+    const client = createSpecialistClient(async () => {
+      throw {
+        kind: "manual_approval_required",
+        message: "Training is paused at the preflight approval gate.",
+      };
+    });
+
+    await expect(client.startSpecialistTraining(
+      "surrogate-experiment-reviewer",
+      "reviewer-dataset-v0",
+    )).rejects.toMatchObject({
+      kind: "manual_approval_required",
+      command: "start_specialist_training",
+      message: "Training is paused at the preflight approval gate.",
+    } satisfies Partial<SpecialistNativeError>);
+  });
+
   it("rejects identity-looking fields from an ordinary chat-shaped response", async () => {
     const client = createSpecialistClient(async () => ({
       message: "A generic provider answer",
@@ -99,6 +118,7 @@ describe("specialist native client", () => {
     await expect(client.runSpecialist({
       schemaVersion: 1,
       specialistId: "surrogate-experiment-reviewer",
+      releaseId: "release-7",
       input: "Review this result",
     })).rejects.toMatchObject({
       kind: "failed",

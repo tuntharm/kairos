@@ -135,7 +135,13 @@ impl PrivateLabStore {
         DatasetStorageLayout::create(&self.root, dataset_id)
     }
 
-    pub fn register_release(
+    /// Registers an evaluation-derived release. Kept crate-private so a UI or
+    /// integration caller cannot assert its own metrics and mint eligibility.
+    #[allow(
+        dead_code,
+        reason = "sealed evaluator integration will call this after the manual gate"
+    )]
+    pub(crate) fn register_release(
         &mut self,
         mut release: ReleaseManifestV1,
         evaluation: &EvaluationReportV1,
@@ -427,6 +433,10 @@ fn evaluation_path(root: &Path, evaluation_id: &StableId) -> Result<PathBuf, Lab
     Ok(directory.join("report.json"))
 }
 
+#[allow(
+    dead_code,
+    reason = "used only by the sealed evaluator release path after approval"
+)]
 fn persist_evaluation(root: &Path, evaluation: &EvaluationReportV1) -> Result<(), LabError> {
     let path = evaluation_path(root, &evaluation.evaluation_id)?;
     let bytes = serde_json::to_vec_pretty(evaluation)?;
@@ -494,6 +504,10 @@ fn project_active_release(state: &mut ReleaseStateV1, activated_at: chrono::Date
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "used only by the sealed evaluator release path after approval"
+)]
 fn validate_release(release: &ReleaseManifestV1) -> Result<(), LabError> {
     if release.schema_version != 1 {
         return Err(LabError::UnsupportedVersion);

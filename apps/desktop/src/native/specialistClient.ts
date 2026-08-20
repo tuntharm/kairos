@@ -58,7 +58,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function parseRunSpecialistEnvelope(value: unknown, expectedSpecialistId: SpecialistId): SpecialistExecutionV1 {
+function parseRunSpecialistEnvelope(
+  value: unknown,
+  expectedSpecialistId: SpecialistId,
+  expectedReleaseId: ReleaseId,
+): SpecialistExecutionV1 {
   const envelope = isRecord(value) ? value : undefined;
   const identity = isRecord(envelope?.identity) ? envelope.identity : undefined;
   const identityFields = [
@@ -81,6 +85,7 @@ function parseRunSpecialistEnvelope(value: unknown, expectedSpecialistId: Specia
     || !sha256(identity.evaluationSha256)
     || !sha256(identity.evidenceBoundarySha256)
     || identity.specialistId !== expectedSpecialistId
+    || identity.releaseId !== expectedReleaseId
     || !isRecord(envelope.output)
     || !("output" in envelope)
   ) {
@@ -125,6 +130,10 @@ export function createSpecialistClient(invoke: NativeInvoke = (command, args) =>
     getSpecialistRelease: (specialistId: SpecialistId, releaseId: ReleaseId) => call<ReleaseManifestV1>(invoke, "get_specialist_release", { specialistId, releaseId }),
     activateSpecialistRelease: (specialistId: SpecialistId, releaseId: ReleaseId, expectedActiveReleaseId: ReleaseId | null) => call<ReleaseManifestV1>(invoke, "activate_specialist_release", { specialistId, releaseId, expectedActiveReleaseId }),
     rollbackSpecialistRelease: (specialistId: SpecialistId, expectedActiveReleaseId: ReleaseId) => call<ReleaseManifestV1>(invoke, "rollback_specialist_release", { specialistId, expectedActiveReleaseId }),
-    runSpecialist: async (request: SpecialistExecutionRequestV1) => parseRunSpecialistEnvelope(await call<unknown>(invoke, "run_specialist", { request }), request.specialistId),
+    runSpecialist: async (request: SpecialistExecutionRequestV1) => parseRunSpecialistEnvelope(
+      await call<unknown>(invoke, "run_specialist", { request }),
+      request.specialistId,
+      request.releaseId,
+    ),
   };
 }

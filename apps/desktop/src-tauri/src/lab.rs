@@ -66,7 +66,7 @@ impl From<LabError> for LabCommandError {
                 LabCommandErrorKind::Conflict,
                 "That release is not eligible for activation.".to_owned(),
             ),
-            LabError::UnsafeProcessPath => (
+            LabError::UnsafeProcessPath | LabError::RuntimeIdentityMismatch => (
                 LabCommandErrorKind::Unavailable,
                 "The managed local training runtime is missing or failed its integrity check."
                     .to_owned(),
@@ -105,6 +105,7 @@ fn parse_id(value: &str) -> Result<StableId, LabCommandError> {
 pub(crate) struct SpecialistExecutionRequestV1 {
     schema_version: u16,
     specialist_id: String,
+    release_id: String,
     input: String,
     session_id: Option<String>,
 }
@@ -306,13 +307,20 @@ pub(crate) fn run_specialist(
         });
     }
     let specialist_id = parse_id(&request.specialist_id)?;
+    let expected_release_id = parse_id(&request.release_id)?;
     let store = open_store()?;
     store.specialist_detail(&specialist_id)?;
     let state = store.release_state(&specialist_id)?;
-    if state.active_release_id.is_none() {
-        return Err(LabCommandError::unavailable(
+    let active_release_id = state.active_release_id.ok_or_else(|| {
+        LabCommandError::unavailable(
             "This specialist has no human-activated eligible release. Kairos did not fall back to a manager model.",
-        ));
+        )
+    })?;
+    if active_release_id != expected_release_id {
+        return Err(LabCommandError {
+            kind: LabCommandErrorKind::Conflict,
+            message: "The active specialist release changed before execution. Review the new release and submit again; Kairos did not run or fall back.".to_owned(),
+        });
     }
     Err(LabCommandError::unavailable(
         "The direct MLX specialist execution runtime has not been approved and installed. Kairos did not fall back or send this input elsewhere.",
@@ -345,10 +353,25 @@ mod tests {
         let input = serde_json::json!({
             "schemaVersion": 1,
             "specialistId": "surrogate-experiment-reviewer",
+            "releaseId": "release-001",
             "input": "Review this experiment",
             "sessionId": null,
             "arbitraryPath": "/tmp/private"
         });
         assert!(serde_json::from_value::<SpecialistExecutionRequestV1>(input).is_err());
+    }
+
+    #[test]
+    fn specialist_execution_request_requires_the_displayed_release_id() {
+        let missing_release = serde_json::json!({
+            "schemaVersion": 1,
+            "specialistId": "surrogate-experiment-reviewer",
+            "input": "Review this experiment",
+            "sessionId": null
+        });
+        assert!(
+            serde_json::from_value::<SpecialistExecutionRequestV1>(missing_release).is_err(),
+            "execution must pin the exact active release shown at submit time"
+        );
     }
 }

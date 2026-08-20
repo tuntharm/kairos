@@ -1602,25 +1602,29 @@ fn store_chat_exchange(
         .collect::<Vec<_>>();
     storage::append_message(
         session,
-        "user",
-        message.to_owned(),
-        Vec::new(),
-        Vec::new(),
-        None,
-        None,
-        routes.clone(),
-        None,
+        storage::NewStoredChatMessage {
+            role: "user".to_owned(),
+            content: message.to_owned(),
+            source_ids: Vec::new(),
+            attachment_names: Vec::new(),
+            provider_id: None,
+            provider_label: None,
+            route_brain_ids: routes.clone(),
+            specialist_identity: None,
+        },
     );
     storage::append_message(
         session,
-        "assistant",
-        answer.content.clone(),
-        answer.source_ids.clone(),
-        Vec::new(),
-        Some(provider.id.clone()),
-        Some(provider.label.clone()),
-        routes,
-        None,
+        storage::NewStoredChatMessage {
+            role: "assistant".to_owned(),
+            content: answer.content.clone(),
+            source_ids: answer.source_ids.clone(),
+            attachment_names: Vec::new(),
+            provider_id: Some(provider.id.clone()),
+            provider_label: Some(provider.label.clone()),
+            route_brain_ids: routes,
+            specialist_identity: None,
+        },
     );
     let id = session.id.clone();
     storage::persist_chat_archive(&path, &archive)?;
@@ -2655,10 +2659,10 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
-            if let (Some(window), Ok(path)) = (app.get_webview_window("main"), config_path()) {
-                if let Ok(config) = load_app_config(&path) {
-                    let _ = window.set_always_on_top(config.app.keep_above_other_windows);
-                }
+            if let (Some(window), Ok(path)) = (app.get_webview_window("main"), config_path())
+                && let Ok(config) = load_app_config(&path)
+            {
+                let _ = window.set_always_on_top(config.app.keep_above_other_windows);
             }
 
             app.global_shortcut().register(configured_shortcut())?;
