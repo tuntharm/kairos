@@ -17,9 +17,18 @@
 ## Layout
 
 - `crates/kairos-core`: policy, routing, context packs, and source provenance.
+- `crates/kairos-lab`: specialist manifests, private Lab state, evaluation,
+  releases, and the typed MLX worker boundary.
 - `crates/kairos-cli`: local terminal and Ollama integration.
 - `crates/kairos-mcp`: local stdio MCP host bridge.
 - `apps/desktop`: Tauri React shell; it must not gain broad filesystem access.
+
+## Current work
+
+- Current state: `docs/current.md`.
+- Active plan: `docs/exec-plans/active/kairos-specialist-foundry-v0.md`.
+- Frozen interface: `docs/specialist-foundry-contract-v1.md`.
+- Private Lab artifacts live under Kairos Application Support and never in Git.
 
 ## Checks
 
