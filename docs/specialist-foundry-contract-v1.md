@@ -40,6 +40,10 @@ SHA-256 content hash. Model identity includes repository, immutable revision,
 quantisation, local file hashes, licence, tokenizer/chat-template hashes,
 runtime lock hash, and generation settings.
 
+Rust DTOs serialize with `camelCase` at the Tauri boundary. IDs and digests are
+opaque strings but must be non-empty and validated by the native service; React
+never upgrades untrusted provider output into release evidence.
+
 Dataset cases record case ID, scenario group, origin, source evidence IDs, gold
 review, gold citations, expected checker findings, reviewer, and split. Related
 scenario groups never cross train/validation/test boundaries. Test material is
@@ -68,6 +72,11 @@ single versioned JSON request is written to stdin. The worker emits NDJSON:
 
 Unknown events and mismatched run IDs fail the job. Raw source text, prompts,
 reasoning, secrets, and arbitrary paths never enter logs or UI events.
+
+Only typed events survive validation. Metric names are allowlisted, safe messages
+are bounded and redacted, and persisted events never accept caller-supplied raw
+bytes. The training request has train/validation identities only; the sealed-test
+path cannot be represented in the worker request type.
 
 ## Native command seam
 
@@ -98,6 +107,23 @@ exact evaluated input/context boundary.
 Activation is an atomic compare-and-swap of the active registry pointer. It
 rejects non-eligible or stale artifacts. Rollback atomically swaps to the
 recorded previous eligible release and preserves both records.
+
+## Evaluation and adapter policy
+
+The held-out weighted score is:
+
+- evidence calibration: 30%
+- unsupported-claim detection: 20%
+- next-experiment quality: 20%
+- citation correctness and coverage: 15%
+- schema/checker/tool behaviour: 15%
+
+A candidate is release-eligible only with weighted score `>= 0.85`, 100% valid
+schema and checker/tool behaviour, and zero fabricated numbers/citations/paths,
+privacy violations, or critical calibration failures. An adapter must also beat
+the identical no-training specialist by at least `0.05`, or fix a registered
+critical failure while passing every other gate without material regression.
+Completing training never implies eligibility.
 
 ## Local storage
 
