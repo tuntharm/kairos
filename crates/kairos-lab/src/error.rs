@@ -32,6 +32,8 @@ pub enum LabError {
     AlreadyExists,
     #[error("unsafe worker executable or script")]
     UnsafeProcessPath,
+    #[error("managed worker runtime does not match its approved lock")]
+    RuntimeIdentityMismatch,
     #[error("I/O operation failed")]
     Io(#[source] std::io::Error),
     #[error("invalid JSON")]

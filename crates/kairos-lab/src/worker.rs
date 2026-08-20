@@ -20,6 +20,7 @@ pub const MAX_WORKER_REQUEST_BYTES: usize = 64 * 1024;
 pub const MAX_WORKER_EVENT_BYTES: usize = 16 * 1024;
 const MAX_WORKER_OUTPUT_BYTES: usize = 512 * 1024;
 const MAX_WORKER_STDERR_BYTES: usize = 4 * 1024;
+const MAX_RUNTIME_LOCK_BYTES: u64 = 16 * 1024;
 const MAX_WORKER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const ALLOWED_METRICS: &[(&str, &str)] = &[
     ("smoke-check", "fraction"),
@@ -333,24 +334,54 @@ impl CancellationToken {
 pub struct ManagedWorkerRuntime {
     program: PathBuf,
     script: PathBuf,
+    runtime_lock_path: PathBuf,
+    approved_runtime_lock_sha256: Sha256Digest,
     program_sha256: Sha256Digest,
     script_sha256: Sha256Digest,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagedRuntimeLockV1 {
+    pub schema_version: u16,
+    pub runtime_id: StableId,
+    pub python_version: String,
+    pub python_sha256: Sha256Digest,
+    pub worker_sha256: Sha256Digest,
+    pub approval_id: StableId,
+    pub approved_at: DateTime<Utc>,
+}
+
 impl ManagedWorkerRuntime {
-    pub fn open_default() -> Result<Self, LabError> {
+    pub fn open_default(approved_runtime_lock_sha256: &Sha256Digest) -> Result<Self, LabError> {
         let home =
             std::env::var_os("HOME").ok_or(LabError::InvalidContract("HOME is unavailable"))?;
         let home = fs::canonicalize(Path::new(&home)).map_err(|_| LabError::UnsafeProcessPath)?;
         let root = home.join("Library/Application Support/Kairos/lab/v1/runtime/mlx-lm-v1");
         reject_existing_symlink_descendants(&home, &root)?;
-        Self::from_root(&root)
+        Self::from_root(&root, approved_runtime_lock_sha256)
     }
 
-    fn from_root(root: &Path) -> Result<Self, LabError> {
+    fn from_root(
+        root: &Path,
+        approved_runtime_lock_sha256: &Sha256Digest,
+    ) -> Result<Self, LabError> {
         let root = fs::canonicalize(root).map_err(|_| LabError::UnsafeProcessPath)?;
         let program = fixed_file_inside(&root, &root.join("python/bin/python3.12"))?;
         let script = fixed_file_inside(&root, &root.join("worker/worker.py"))?;
+        let runtime_lock_path = fixed_file_inside(&root, &root.join("runtime-lock.json"))?;
+        let metadata = fs::metadata(&runtime_lock_path)?;
+        if metadata.len() > MAX_RUNTIME_LOCK_BYTES {
+            return Err(LabError::InputTooLarge);
+        }
+        let lock_bytes = fs::read(&runtime_lock_path)?;
+        if hash_bytes(&lock_bytes)? != *approved_runtime_lock_sha256 {
+            return Err(LabError::RuntimeIdentityMismatch);
+        }
+        let runtime_lock: ManagedRuntimeLockV1 = serde_json::from_slice(&lock_bytes)?;
+        if runtime_lock.schema_version != 1 || runtime_lock.python_version != "3.12" {
+            return Err(LabError::RuntimeIdentityMismatch);
+        }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -358,12 +389,31 @@ impl ManagedWorkerRuntime {
                 return Err(LabError::UnsafeProcessPath);
             }
         }
+        let program_sha256 = hash_file(&program)?;
+        let script_sha256 = hash_file(&script)?;
+        if program_sha256 != runtime_lock.python_sha256
+            || script_sha256 != runtime_lock.worker_sha256
+        {
+            return Err(LabError::RuntimeIdentityMismatch);
+        }
         Ok(Self {
-            program_sha256: hash_file(&program)?,
-            script_sha256: hash_file(&script)?,
+            program_sha256,
+            script_sha256,
             program,
             script,
+            runtime_lock_path,
+            approved_runtime_lock_sha256: approved_runtime_lock_sha256.clone(),
         })
+    }
+
+    fn validate_approved_files(&self) -> Result<(), LabError> {
+        if hash_file(&self.program)? != self.program_sha256
+            || hash_file(&self.script)? != self.script_sha256
+            || hash_file(&self.runtime_lock_path)? != self.approved_runtime_lock_sha256
+        {
+            return Err(LabError::RuntimeIdentityMismatch);
+        }
+        Ok(())
     }
 
     pub fn program_sha256(&self) -> &Sha256Digest {
@@ -396,8 +446,14 @@ pub struct WorkerRunner {
 }
 
 impl WorkerRunner {
-    pub fn open_default(timeout: Duration) -> Result<Self, LabError> {
-        Self::from_runtime(ManagedWorkerRuntime::open_default()?, timeout)
+    pub fn open_default(
+        timeout: Duration,
+        approved_runtime_lock_sha256: &Sha256Digest,
+    ) -> Result<Self, LabError> {
+        Self::from_runtime(
+            ManagedWorkerRuntime::open_default(approved_runtime_lock_sha256)?,
+            timeout,
+        )
     }
 
     fn from_runtime(runtime: ManagedWorkerRuntime, timeout: Duration) -> Result<Self, LabError> {
@@ -412,8 +468,25 @@ impl WorkerRunner {
         request: &WorkerRequestV1,
         cancellation: &CancellationToken,
     ) -> Result<Vec<WorkerEventV1>, LabError> {
+        self.preflight(request)?;
+        self.run_preflighted(request, cancellation)
+    }
+
+    fn preflight(&self, request: &WorkerRequestV1) -> Result<(), LabError> {
+        self.runtime.validate_approved_files()?;
         let request_bytes = serde_json::to_vec(request)?;
         parse_worker_request(&request_bytes)?;
+        Ok(())
+    }
+
+    fn run_preflighted(
+        &self,
+        request: &WorkerRequestV1,
+        cancellation: &CancellationToken,
+    ) -> Result<Vec<WorkerEventV1>, LabError> {
+        // Recheck immediately before spawn so preflight approval cannot go stale silently.
+        self.runtime.validate_approved_files()?;
+        let request_bytes = serde_json::to_vec(request)?;
         let mut child = self.runtime.command().spawn()?;
         let mut stdin = child
             .stdin
@@ -480,10 +553,24 @@ pub fn orchestrate_noop_run(
     request: &WorkerRequestV1,
     cancellation: &CancellationToken,
 ) -> Result<JobTerminalRecordV1, LabError> {
-    let (state, reason_code) = match runner.run(request, cancellation) {
+    store.create_job_lifecycle(&request.run_id)?;
+    store.transition_job_state(&request.run_id, JobState::Preflight)?;
+    if let Err(error) = runner.preflight(request) {
+        persist_terminal_state(
+            store,
+            &request.run_id,
+            JobState::Failed,
+            StableId::parse("preflight-failed")?,
+        )?;
+        return Err(error);
+    }
+    store.transition_job_state(&request.run_id, JobState::Running)?;
+
+    let (state, reason_code) = match runner.run_preflighted(request, cancellation) {
         Ok(events) => {
+            store.transition_job_state(&request.run_id, JobState::Validating)?;
             for (index, worker_event) in events.into_iter().enumerate() {
-                store.append_job_event(&JobEventV1 {
+                let event = JobEventV1 {
                     schema_version: 1,
                     event_id: StableId::parse(format!(
                         "{}-event-{index:03}",
@@ -492,27 +579,44 @@ pub fn orchestrate_noop_run(
                     run_id: request.run_id.clone(),
                     recorded_at: Utc::now(),
                     worker_event,
-                })?;
+                };
+                if let Err(error) = store.append_job_event(&event) {
+                    persist_terminal_state(
+                        store,
+                        &request.run_id,
+                        JobState::Failed,
+                        StableId::parse("event-persist-failed")?,
+                    )?;
+                    return Err(error);
+                }
             }
             (JobState::Succeeded, StableId::parse("completed")?)
         }
         Err(LabError::WorkerCancelled) => (JobState::Cancelled, StableId::parse("cancelled")?),
         Err(LabError::WorkerTimedOut) => (JobState::Interrupted, StableId::parse("timeout")?),
         Err(error) => {
-            let record = JobTerminalRecordV1 {
-                schema_version: 1,
-                run_id: request.run_id.clone(),
-                state: JobState::Failed,
-                reason_code: StableId::parse("worker-failed")?,
-                recorded_at: Utc::now(),
-            };
-            store.persist_job_terminal(&record)?;
+            persist_terminal_state(
+                store,
+                &request.run_id,
+                JobState::Failed,
+                StableId::parse("worker-failed")?,
+            )?;
             return Err(error);
         }
     };
+    persist_terminal_state(store, &request.run_id, state, reason_code)
+}
+
+fn persist_terminal_state(
+    store: &PrivateLabStore,
+    run_id: &StableId,
+    state: JobState,
+    reason_code: StableId,
+) -> Result<JobTerminalRecordV1, LabError> {
+    store.transition_job_state(run_id, state)?;
     let record = JobTerminalRecordV1 {
         schema_version: 1,
-        run_id: request.run_id.clone(),
+        run_id: run_id.clone(),
         state,
         reason_code,
         recorded_at: Utc::now(),
@@ -608,6 +712,10 @@ fn hash_file(path: &Path) -> Result<Sha256Digest, LabError> {
     Sha256Digest::parse(format!("{:x}", digest.finalize()))
 }
 
+fn hash_bytes(bytes: &[u8]) -> Result<Sha256Digest, LabError> {
+    Sha256Digest::parse(format!("{:x}", Sha256::digest(bytes)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -668,7 +776,19 @@ mod tests {
         let worker = root.join("worker/worker.py");
         fs::write(&worker, script).unwrap();
         fs::set_permissions(&worker, fs::Permissions::from_mode(0o700)).unwrap();
-        let runtime = ManagedWorkerRuntime::from_root(&root).unwrap();
+        let runtime_lock = ManagedRuntimeLockV1 {
+            schema_version: 1,
+            runtime_id: StableId::parse("mlx-lm-runtime-v1").unwrap(),
+            python_version: "3.12".to_owned(),
+            python_sha256: hash_file(&program).unwrap(),
+            worker_sha256: hash_file(&worker).unwrap(),
+            approval_id: StableId::parse("runtime-approval-001").unwrap(),
+            approved_at: "2026-08-20T00:00:00Z".parse().unwrap(),
+        };
+        let lock_bytes = serde_json::to_vec_pretty(&runtime_lock).unwrap();
+        fs::write(root.join("runtime-lock.json"), &lock_bytes).unwrap();
+        let approved_lock_sha256 = hash_bytes(&lock_bytes).unwrap();
+        let runtime = ManagedWorkerRuntime::from_root(&root, &approved_lock_sha256).unwrap();
         (temp, runtime)
     }
 
@@ -698,6 +818,22 @@ printf '%s\n' '{"protocol_version":1,"type":"completed","run_id":"run-001","adap
 
     #[cfg(unix)]
     #[test]
+    fn managed_runtime_rejects_worker_tampering_after_approved_lock_load() {
+        let (_temp, runtime) = runtime_with_script("#!/bin/sh\nexit 0\n");
+        fs::write(&runtime.script, "#!/bin/sh\necho tampered\n").unwrap();
+        assert!(runtime.validate_approved_files().is_err());
+
+        let (_temp, runtime) = runtime_with_script("#!/bin/sh\nexit 0\n");
+        fs::write(&runtime.program, "#!/bin/sh\necho tampered\n").unwrap();
+        assert!(runtime.validate_approved_files().is_err());
+
+        let (_temp, runtime) = runtime_with_script("#!/bin/sh\nexit 0\n");
+        fs::write(&runtime.runtime_lock_path, b"{}").unwrap();
+        assert!(runtime.validate_approved_files().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn noop_orchestration_persists_success_cancel_and_timeout_terminals() {
         let success_script = r#"#!/bin/sh
 cat >/dev/null
@@ -716,6 +852,31 @@ printf '%s\n' '{"protocol_version":1,"type":"completed","run_id":"run-001","adap
             store.load_job_terminal(&request().run_id).unwrap().state,
             JobState::Succeeded
         );
+        assert_eq!(
+            store
+                .load_job_lifecycle(&request().run_id)
+                .unwrap()
+                .history
+                .into_iter()
+                .map(|entry| entry.state)
+                .collect::<Vec<_>>(),
+            vec![
+                JobState::Queued,
+                JobState::Preflight,
+                JobState::Running,
+                JobState::Validating,
+                JobState::Succeeded,
+            ]
+        );
+        drop(store);
+        let reopened = PrivateLabStore::open_at(storage.path()).unwrap();
+        assert_eq!(
+            reopened
+                .load_job_lifecycle(&request().run_id)
+                .unwrap()
+                .current_state,
+            JobState::Succeeded
+        );
 
         let (_runtime_temp, runtime) =
             runtime_with_script("#!/bin/sh\ncat >/dev/null\nwhile :; do :; done\n");
@@ -726,6 +887,21 @@ printf '%s\n' '{"protocol_version":1,"type":"completed","run_id":"run-001","adap
             orchestrate_noop_run(&store, &runner, &request(), &CancellationToken::default())
                 .unwrap();
         assert_eq!(timed_out.state, JobState::Interrupted);
+        assert_eq!(
+            store
+                .load_job_lifecycle(&request().run_id)
+                .unwrap()
+                .history
+                .into_iter()
+                .map(|entry| entry.state)
+                .collect::<Vec<_>>(),
+            vec![
+                JobState::Queued,
+                JobState::Preflight,
+                JobState::Running,
+                JobState::Interrupted,
+            ]
+        );
 
         let (_runtime_temp, runtime) =
             runtime_with_script("#!/bin/sh\ncat >/dev/null\nwhile :; do :; done\n");
@@ -736,6 +912,21 @@ printf '%s\n' '{"protocol_version":1,"type":"completed","run_id":"run-001","adap
         cancellation.cancel();
         let cancelled = orchestrate_noop_run(&store, &runner, &request(), &cancellation).unwrap();
         assert_eq!(cancelled.state, JobState::Cancelled);
+        assert_eq!(
+            store
+                .load_job_lifecycle(&request().run_id)
+                .unwrap()
+                .history
+                .into_iter()
+                .map(|entry| entry.state)
+                .collect::<Vec<_>>(),
+            vec![
+                JobState::Queued,
+                JobState::Preflight,
+                JobState::Running,
+                JobState::Cancelled,
+            ]
+        );
     }
 
     #[cfg(unix)]

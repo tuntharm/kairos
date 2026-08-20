@@ -148,6 +148,7 @@ pub fn training_dataset_view(
     if manifest.state != DatasetState::Frozen {
         return Err(LabError::InvalidContract("training dataset is not frozen"));
     }
+    validate_v0_split_shape(manifest)?;
     validate_grouped_dataset(manifest, cases)?;
     let mut train_case_ids = Vec::new();
     let mut validation_case_ids = Vec::new();
@@ -252,6 +253,26 @@ mod tests {
         let json = serde_json::to_string(&view).unwrap();
         assert!(!json.contains("testCase"));
         assert!(!json.contains("testPath"));
+    }
+
+    #[test]
+    fn training_projection_rejects_a_manifest_and_cases_with_71_19_30_shape() {
+        let (mut manifest, mut cases) = v0_dataset();
+        let moved = cases
+            .iter_mut()
+            .find(|case| case.split == DatasetSplitV1::Train)
+            .unwrap();
+        moved.split = DatasetSplitV1::Validation;
+        moved.scenario_group = StableId::parse("validation-extra-group").unwrap();
+        manifest.split_counts.insert(DatasetSplitV1::Train, 71);
+        manifest.split_counts.insert(DatasetSplitV1::Validation, 19);
+        manifest.scenario_group_splits.insert(
+            StableId::parse("validation-extra-group").unwrap(),
+            DatasetSplitV1::Validation,
+        );
+
+        assert!(validate_grouped_dataset(&manifest, &cases).is_ok());
+        assert!(training_dataset_view(&manifest, &cases).is_err());
     }
 
     #[test]

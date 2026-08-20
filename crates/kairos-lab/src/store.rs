@@ -16,6 +16,7 @@ use std::{
 
 const REGISTRY_SCHEMA_VERSION: u16 = 1;
 const MAX_EVENT_BYTES: usize = 16 * 1024;
+const MAX_JOB_LIFECYCLE_BYTES: u64 = 64 * 1024;
 const MAX_REGISTRY_BYTES: u64 = 4 * 1024 * 1024;
 const LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -43,6 +44,22 @@ pub struct JobTerminalRecordV1 {
     pub state: JobState,
     pub reason_code: StableId,
     pub recorded_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct JobLifecycleEntryV1 {
+    pub state: JobState,
+    pub recorded_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct JobLifecycleV1 {
+    pub schema_version: u16,
+    pub run_id: StableId,
+    pub current_state: JobState,
+    pub history: Vec<JobLifecycleEntryV1>,
 }
 
 impl Default for RegistryV1 {
@@ -257,6 +274,62 @@ impl PrivateLabStore {
         Ok(())
     }
 
+    pub fn create_job_lifecycle(&self, run_id: &StableId) -> Result<JobLifecycleV1, LabError> {
+        let _lock = RegistryLock::acquire(&self.root)?;
+        let directory = ensure_private_child_tree(&self.root, &["jobs", run_id.as_str()])?;
+        let path = directory.join("lifecycle.json");
+        reject_symlink_if_present(&path)?;
+        if path.exists() {
+            return Err(LabError::AlreadyExists);
+        }
+        let now = Utc::now();
+        let lifecycle = JobLifecycleV1 {
+            schema_version: 1,
+            run_id: run_id.clone(),
+            current_state: JobState::Queued,
+            history: vec![JobLifecycleEntryV1 {
+                state: JobState::Queued,
+                recorded_at: now,
+            }],
+        };
+        write_file_atomic(&self.root, &path, &serde_json::to_vec_pretty(&lifecycle)?)?;
+        Ok(lifecycle)
+    }
+
+    pub fn transition_job_state(
+        &self,
+        run_id: &StableId,
+        next_state: JobState,
+    ) -> Result<JobLifecycleV1, LabError> {
+        let _lock = RegistryLock::acquire(&self.root)?;
+        let path = self.job_lifecycle_path(run_id);
+        let mut lifecycle = read_job_lifecycle(&path, run_id)?;
+        let mut candidate_state = lifecycle.current_state;
+        candidate_state.transition(next_state)?;
+        lifecycle.current_state = candidate_state;
+        lifecycle.history.push(JobLifecycleEntryV1 {
+            state: candidate_state,
+            recorded_at: Utc::now(),
+        });
+        let bytes = serde_json::to_vec_pretty(&lifecycle)?;
+        if bytes.len() as u64 > MAX_JOB_LIFECYCLE_BYTES {
+            return Err(LabError::InputTooLarge);
+        }
+        write_file_atomic(&self.root, &path, &bytes)?;
+        Ok(lifecycle)
+    }
+
+    pub fn load_job_lifecycle(&self, run_id: &StableId) -> Result<JobLifecycleV1, LabError> {
+        read_job_lifecycle(&self.job_lifecycle_path(run_id), run_id)
+    }
+
+    fn job_lifecycle_path(&self, run_id: &StableId) -> PathBuf {
+        self.root
+            .join("jobs")
+            .join(run_id.as_str())
+            .join("lifecycle.json")
+    }
+
     pub fn persist_job_terminal(&self, record: &JobTerminalRecordV1) -> Result<(), LabError> {
         if record.schema_version != 1
             || !matches!(
@@ -271,6 +344,13 @@ impl PrivateLabStore {
         }
         let mut lock = RegistryLock::acquire(&self.root)?;
         lock.heartbeat()?;
+        let lifecycle =
+            read_job_lifecycle(&self.job_lifecycle_path(&record.run_id), &record.run_id)?;
+        if lifecycle.current_state != record.state {
+            return Err(LabError::InvalidContract(
+                "terminal record does not match lifecycle",
+            ));
+        }
         let directory = ensure_private_child_tree(&self.root, &["jobs", record.run_id.as_str()])?;
         let path = directory.join("terminal.json");
         let bytes = serde_json::to_vec_pretty(record)?;
@@ -314,6 +394,27 @@ impl PrivateLabStore {
         self.registry = next;
         Ok(())
     }
+}
+
+fn read_job_lifecycle(path: &Path, expected_run_id: &StableId) -> Result<JobLifecycleV1, LabError> {
+    reject_symlink(path)?;
+    let metadata = fs::metadata(path)?;
+    if !metadata.is_file() || metadata.len() > MAX_JOB_LIFECYCLE_BYTES {
+        return Err(LabError::InputTooLarge);
+    }
+    let lifecycle: JobLifecycleV1 = serde_json::from_slice(&fs::read(path)?)?;
+    if lifecycle.schema_version != 1
+        || lifecycle.run_id != *expected_run_id
+        || lifecycle.history.first().map(|entry| entry.state) != Some(JobState::Queued)
+        || lifecycle.history.last().map(|entry| entry.state) != Some(lifecycle.current_state)
+    {
+        return Err(LabError::InvalidContract("invalid job lifecycle identity"));
+    }
+    for states in lifecycle.history.windows(2) {
+        let mut state = states[0].state;
+        state.transition(states[1].state)?;
+    }
+    Ok(lifecycle)
 }
 
 fn evaluation_digest(evaluation: &EvaluationReportV1) -> Result<Sha256Digest, LabError> {
@@ -496,6 +597,9 @@ impl RegistryLock {
                     if age < stale_after {
                         return Err(LabError::RegistryLocked);
                     }
+                    if lock_owner_is_live(&path) {
+                        return Err(LabError::RegistryLocked);
+                    }
                     let stale = root.join(format!(
                         ".registry.lock.stale.{}.{}",
                         std::process::id(),
@@ -522,6 +626,47 @@ impl RegistryLock {
         write!(self.file, "{}\n{}\n", self.nonce, unix_millis())?;
         self.file.sync_all()?;
         Ok(())
+    }
+}
+
+fn lock_owner_is_live(path: &Path) -> bool {
+    let owner_pid = fs::metadata(path)
+        .ok()
+        .filter(|metadata| metadata.len() <= 256)
+        .and_then(|_| fs::read_to_string(path).ok())
+        .and_then(|contents| {
+            contents
+                .lines()
+                .next()?
+                .split('-')
+                .next()?
+                .parse::<u32>()
+                .ok()
+        });
+    let Some(owner_pid) = owner_pid else {
+        // An unparseable lock has no safe ownership proof, so never steal it.
+        return true;
+    };
+
+    #[cfg(unix)]
+    {
+        let Ok(owner_pid) = i32::try_from(owner_pid) else {
+            return true;
+        };
+        if owner_pid <= 0 {
+            return true;
+        }
+        // SAFETY: kill(pid, 0) sends no signal; it only queries whether the PID exists.
+        let result = unsafe { libc::kill(owner_pid, 0) };
+        if result == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+
+    #[cfg(not(unix))]
+    {
+        true
     }
 }
 
@@ -781,11 +926,48 @@ mod tests {
     }
 
     #[test]
+    fn invalid_job_transition_preserves_lifecycle_bytes_across_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = PrivateLabStore::open_at(temp.path()).unwrap();
+        let run_id = StableId::parse("run-lifecycle-001").unwrap();
+        store.create_job_lifecycle(&run_id).unwrap();
+        store
+            .transition_job_state(&run_id, JobState::Preflight)
+            .unwrap();
+        let lifecycle_path = store
+            .root()
+            .join("jobs")
+            .join(run_id.as_str())
+            .join("lifecycle.json");
+        let before = fs::read(&lifecycle_path).unwrap();
+
+        assert!(
+            store
+                .transition_job_state(&run_id, JobState::Succeeded)
+                .is_err()
+        );
+        assert_eq!(fs::read(&lifecycle_path).unwrap(), before);
+        drop(store);
+
+        let reopened = PrivateLabStore::open_at(temp.path()).unwrap();
+        let lifecycle = reopened.load_job_lifecycle(&run_id).unwrap();
+        assert_eq!(lifecycle.current_state, JobState::Preflight);
+        assert_eq!(
+            lifecycle
+                .history
+                .iter()
+                .map(|entry| entry.state)
+                .collect::<Vec<_>>(),
+            vec![JobState::Queued, JobState::Preflight]
+        );
+    }
+
+    #[test]
     fn stale_lock_is_recovered_and_live_lock_heartbeat_is_preserved() {
         let temp = tempfile::tempdir().unwrap();
         let store = PrivateLabStore::open_at(temp.path()).unwrap();
         let lock_path = store.root().join("registry.lock");
-        fs::write(&lock_path, "abandoned\n0\n").unwrap();
+        fs::write(&lock_path, format!("{}-abandoned-1\n0\n", i32::MAX)).unwrap();
         let mut recovered =
             RegistryLock::acquire_with_stale_after(store.root(), Duration::ZERO).unwrap();
         let first = fs::read_to_string(&lock_path).unwrap();
@@ -794,6 +976,23 @@ mod tests {
         assert_eq!(first.lines().next(), second.lines().next());
         drop(recovered);
         assert!(!lock_path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expired_lock_owned_by_this_live_process_is_never_stolen() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = PrivateLabStore::open_at(temp.path()).unwrap();
+        let lock_path = store.root().join("registry.lock");
+        let live_nonce = format!("{}-old-lock-1", std::process::id());
+        fs::write(&lock_path, format!("{live_nonce}\n0\n")).unwrap();
+        let before = fs::read(&lock_path).unwrap();
+
+        assert!(matches!(
+            RegistryLock::acquire_with_stale_after(store.root(), Duration::ZERO),
+            Err(LabError::RegistryLocked)
+        ));
+        assert_eq!(fs::read(&lock_path).unwrap(), before);
     }
 
     #[cfg(unix)]
