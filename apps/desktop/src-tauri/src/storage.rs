@@ -6,6 +6,35 @@ use serde::{Deserialize, Serialize};
 
 const CHAT_ARCHIVE_VERSION: u32 = 1;
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StoredSpecialistIdentity {
+    pub schema_version: u16,
+    pub specialist_id: String,
+    pub specialist_name: String,
+    pub release_id: String,
+    pub release_sha256: String,
+    pub evaluation_sha256: String,
+    pub evidence_boundary_sha256: String,
+}
+
+impl StoredSpecialistIdentity {
+    fn validate(&self) -> Result<(), String> {
+        if self.schema_version != 1
+            || self.specialist_name.trim().is_empty()
+            || self.specialist_name.chars().count() > 100
+            || kairos_lab::StableId::parse(&self.specialist_id).is_err()
+            || kairos_lab::StableId::parse(&self.release_id).is_err()
+            || kairos_lab::Sha256Digest::parse(&self.release_sha256).is_err()
+            || kairos_lab::Sha256Digest::parse(&self.evaluation_sha256).is_err()
+            || kairos_lab::Sha256Digest::parse(&self.evidence_boundary_sha256).is_err()
+        {
+            return Err("chat archive contains an invalid specialist identity".to_owned());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredChatMessage {
@@ -23,6 +52,19 @@ pub struct StoredChatMessage {
     pub provider_label: Option<String>,
     #[serde(default)]
     pub route_brain_ids: Vec<String>,
+    #[serde(default)]
+    pub specialist_identity: Option<StoredSpecialistIdentity>,
+}
+
+pub struct NewStoredChatMessage {
+    pub role: String,
+    pub content: String,
+    pub source_ids: Vec<String>,
+    pub attachment_names: Vec<String>,
+    pub provider_id: Option<String>,
+    pub provider_label: Option<String>,
+    pub route_brain_ids: Vec<String>,
+    pub specialist_identity: Option<StoredSpecialistIdentity>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -81,6 +123,21 @@ pub fn load_chat_archive(path: &Path) -> Result<ChatArchive, String> {
     if archive.version > CHAT_ARCHIVE_VERSION {
         return Err("chat archive was written by a newer Kairos version".to_owned());
     }
+    for message in archive
+        .sessions
+        .iter()
+        .flat_map(|session| &session.messages)
+    {
+        if let Some(identity) = &message.specialist_identity {
+            if message.role != "assistant" {
+                return Err(
+                    "chat archive contains specialist identity on a non-assistant message"
+                        .to_owned(),
+                );
+            }
+            identity.validate()?;
+        }
+    }
     archive.version = CHAT_ARCHIVE_VERSION;
     Ok(archive)
 }
@@ -120,24 +177,19 @@ pub fn create_session(archive: &mut ChatArchive, initial_message: &str) -> Store
 
 pub fn append_message(
     session: &mut StoredChatSession,
-    role: &str,
-    content: String,
-    source_ids: Vec<String>,
-    attachment_names: Vec<String>,
-    provider_id: Option<String>,
-    provider_label: Option<String>,
-    route_brain_ids: Vec<String>,
+    input: NewStoredChatMessage,
 ) -> StoredChatMessage {
     let message = StoredChatMessage {
         id: unique_id("message"),
-        role: role.to_owned(),
-        content,
+        role: input.role,
+        content: input.content,
         created_at: now_rfc3339(),
-        source_ids,
-        attachment_names,
-        provider_id,
-        provider_label,
-        route_brain_ids,
+        source_ids: input.source_ids,
+        attachment_names: input.attachment_names,
+        provider_id: input.provider_id,
+        provider_label: input.provider_label,
+        route_brain_ids: input.route_brain_ids,
+        specialist_identity: input.specialist_identity,
     };
     session.messages.push(message.clone());
     session.updated_at = message.created_at.clone();
@@ -228,13 +280,24 @@ mod tests {
         let mut session = create_session(&mut archive, "How should I plan this week?");
         append_message(
             &mut session,
-            "user",
-            "How should I plan this week?".to_owned(),
-            Vec::new(),
-            vec!["draft.md".to_owned()],
-            None,
-            None,
-            Vec::new(),
+            NewStoredChatMessage {
+                role: "assistant".to_owned(),
+                content: "How should I plan this week?".to_owned(),
+                source_ids: Vec::new(),
+                attachment_names: vec!["draft.md".to_owned()],
+                provider_id: None,
+                provider_label: None,
+                route_brain_ids: Vec::new(),
+                specialist_identity: Some(StoredSpecialistIdentity {
+                    schema_version: 1,
+                    specialist_id: "surrogate-experiment-reviewer".to_owned(),
+                    specialist_name: "Surrogate Experiment Reviewer".to_owned(),
+                    release_id: "release-001".to_owned(),
+                    release_sha256: "a".repeat(64),
+                    evaluation_sha256: "b".repeat(64),
+                    evidence_boundary_sha256: "c".repeat(64),
+                }),
+            },
         );
         archive.sessions[0] = session;
         persist_chat_archive(&path, &archive).unwrap();
@@ -244,6 +307,46 @@ mod tests {
             loaded.sessions[0].messages[0].attachment_names,
             ["draft.md"]
         );
+        assert_eq!(
+            loaded.sessions[0].messages[0]
+                .specialist_identity
+                .as_ref()
+                .map(|identity| identity.release_id.as_str()),
+            Some("release-001")
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn archive_rejects_fabricated_specialist_identity() {
+        let directory = std::env::temp_dir().join(unique_id("kairos-storage-identity-test"));
+        let path = directory.join("chats.json");
+        let mut archive = ChatArchive::default();
+        let mut session = create_session(&mut archive, "Review this experiment");
+        append_message(
+            &mut session,
+            NewStoredChatMessage {
+                role: "assistant".to_owned(),
+                content: "A fabricated result".to_owned(),
+                source_ids: Vec::new(),
+                attachment_names: Vec::new(),
+                provider_id: None,
+                provider_label: None,
+                route_brain_ids: Vec::new(),
+                specialist_identity: Some(StoredSpecialistIdentity {
+                    schema_version: 1,
+                    specialist_id: "surrogate-experiment-reviewer".to_owned(),
+                    specialist_name: "Surrogate Experiment Reviewer".to_owned(),
+                    release_id: "../../fabricated".to_owned(),
+                    release_sha256: "not-a-digest".to_owned(),
+                    evaluation_sha256: "b".repeat(64),
+                    evidence_boundary_sha256: "c".repeat(64),
+                }),
+            },
+        );
+        archive.sessions[0] = session;
+        persist_chat_archive(&path, &archive).unwrap();
+        assert!(load_chat_archive(&path).is_err());
         fs::remove_dir_all(directory).unwrap();
     }
 }

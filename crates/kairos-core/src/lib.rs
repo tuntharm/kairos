@@ -40,10 +40,11 @@ pub use policy::{
     enforce_content_egress, evaluate_access, preflight_retrieval_access, preflight_startup_access,
 };
 pub use provider::{
-    BriefAnswer, ChatAnswer, ConversationTurn, InstalledModel, OllamaModelTest, OllamaProvider,
-    OllamaPullProgress, OllamaStatus, chat_with_anthropic_api, chat_with_claude_cli,
-    chat_with_codex_cli, chat_with_ollama, chat_with_openai_api, ollama_status, pull_ollama_model,
-    render_chat_prompt, stream_chat_with_ollama, synthesize_ollama, test_ollama_model,
+    BriefAnswer, ChatAnswer, ConversationTurn, InstalledModel, OllamaChatDelta, OllamaModelTest,
+    OllamaProvider, OllamaPullProgress, OllamaStatus, chat_with_anthropic_api,
+    chat_with_claude_cli, chat_with_codex_cli, chat_with_ollama, chat_with_openai_api,
+    ollama_status, pull_ollama_model, render_chat_prompt, stream_chat_with_ollama,
+    synthesize_ollama, test_ollama_model,
 };
 pub use routing::{CROSS_BRAIN_PULSE_QUERY, RouteResult, RoutedBrain, route_query};
 pub use write::{

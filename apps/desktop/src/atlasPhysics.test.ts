@@ -52,4 +52,18 @@ describe("atlas physics", () => {
       expect(position.y).toBeLessThanOrEqual(98);
     });
   });
+
+  it("normalizes an oversized saved world before simulation", () => {
+    const controller = createAtlasPhysics([
+      { id: "far-a", brainId: "one", kind: "note", x: -555, y: -615 },
+      { id: "far-b", brainId: "two", kind: "note", x: 733, y: 721 },
+    ], [{ source: "far-a", target: "far-b", kind: "wiki_link" }], {});
+    expect(controller).not.toBeNull();
+    const positions = settleAtlasPhysics(controller!, 1);
+    const values = Object.values(positions);
+    expect(Math.min(...values.map((position) => position.x))).toBeGreaterThan(-12);
+    expect(Math.max(...values.map((position) => position.x))).toBeLessThan(112);
+    expect(Math.min(...values.map((position) => position.y))).toBeGreaterThan(-12);
+    expect(Math.max(...values.map((position) => position.y))).toBeLessThan(112);
+  });
 });

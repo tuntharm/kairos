@@ -5,7 +5,6 @@ import {
   forceSimulation,
   forceX,
   forceY,
-  type Force,
   type Simulation,
   type SimulationLinkDatum,
   type SimulationNodeDatum,
@@ -16,6 +15,7 @@ export type AtlasGraphNode = {
   brainId: string;
   clusterId?: string;
   kind?: string;
+  protected?: boolean;
   x?: number;
   y?: number;
 };
@@ -48,11 +48,8 @@ const meaningfulEdgeKinds = new Set([
   "bridge",
 ]);
 
-const maxAtlasCoordinate = 98;
-const minAtlasCoordinate = 2;
-
 export function clampAtlasCoordinate(value: number) {
-  return Math.max(minAtlasCoordinate, Math.min(maxAtlasCoordinate, value));
+  return Number.isFinite(value) ? value : 50;
 }
 
 function edgeKind(edge: Pick<AtlasGraphEdge, "kind">) {
@@ -84,23 +81,17 @@ export function atlasNodeDiameter(node: Pick<AtlasGraphNode, "kind">, degree: nu
 
 function linkDistance(edge: AtlasForceEdge) {
   switch (edgeKind(edge)) {
-    case "owns": return 26;
-    case "contains": return 10;
-    case "tag": return 11;
     case "cross_brain_bridge":
-    case "bridge": return 29;
-    default: return 15;
+    case "bridge": return 20;
+    default: return 9;
   }
 }
 
 function linkStrength(edge: AtlasForceEdge) {
   switch (edgeKind(edge)) {
-    case "owns": return 0.03;
-    case "contains": return 0.08;
-    case "tag": return 0.035;
     case "cross_brain_bridge":
-    case "bridge": return 0.025;
-    default: return 0.065;
+    case "bridge": return 0.055;
+    default: return 0.045;
   }
 }
 
@@ -129,6 +120,24 @@ function seedPosition(node: AtlasGraphNode, pinnedPositions: AtlasPositions) {
   };
 }
 
+function normalizeStartingPositions(nodes: AtlasGraphNode[], pinnedPositions: AtlasPositions) {
+  const positioned = nodes
+    .filter((node) => !isKairosNode(node) && !pinnedPositions[node.id] && Number.isFinite(node.x) && Number.isFinite(node.y));
+  if (positioned.length < 2) return nodes;
+  const minX = Math.min(...positioned.map((node) => node.x!));
+  const maxX = Math.max(...positioned.map((node) => node.x!));
+  const minY = Math.min(...positioned.map((node) => node.y!));
+  const maxY = Math.max(...positioned.map((node) => node.y!));
+  if (minX >= -12 && maxX <= 112 && minY >= -12 && maxY <= 112) return nodes;
+  const scale = Math.min(80 / Math.max(0.001, maxX - minX), 80 / Math.max(0.001, maxY - minY));
+  const offsetX = 50 - ((minX + maxX) / 2) * scale;
+  const offsetY = 50 - ((minY + maxY) / 2) * scale;
+  return nodes.map((node) => {
+    if (isKairosNode(node) || pinnedPositions[node.id] || !Number.isFinite(node.x) || !Number.isFinite(node.y)) return node;
+    return { ...node, x: node.x! * scale + offsetX, y: node.y! * scale + offsetY };
+  });
+}
+
 function clusterCentres(nodes: AtlasGraphNode[]) {
   const brainIds = Array.from(new Set(nodes.map((node) => node.brainId || node.clusterId || "unassigned")))
     .sort((left, right) => left.localeCompare(right));
@@ -141,38 +150,6 @@ function clusterCentres(nodes: AtlasGraphNode[]) {
       y: 50 + Math.sin(angle) * radius,
     }];
   }));
-}
-
-function atlasBoundsForce(): Force<AtlasForceNode, undefined> {
-  let nodes: AtlasForceNode[] = [];
-  const min = 4;
-  const max = 96;
-  const force = (() => {
-    nodes.forEach((node) => {
-      if (node.fx === undefined || node.fx === null) {
-        if (node.x < min) {
-          node.x = min;
-          node.vx = Math.max(0, node.vx ?? 0) * 0.35;
-        } else if (node.x > max) {
-          node.x = max;
-          node.vx = Math.min(0, node.vx ?? 0) * 0.35;
-        }
-      }
-      if (node.fy === undefined || node.fy === null) {
-        if (node.y < min) {
-          node.y = min;
-          node.vy = Math.max(0, node.vy ?? 0) * 0.35;
-        } else if (node.y > max) {
-          node.y = max;
-          node.vy = Math.min(0, node.vy ?? 0) * 0.35;
-        }
-      }
-    });
-  }) as Force<AtlasForceNode, undefined>;
-  force.initialize = (nextNodes) => {
-    nodes = nextNodes;
-  };
-  return force;
 }
 
 export type AtlasPhysicsController = {
@@ -190,12 +167,13 @@ export function createAtlasPhysics(
   graphEdges: AtlasGraphEdge[],
   pinnedPositions: AtlasPositions,
 ): AtlasPhysicsController | null {
-  const nodes = graphNodes.filter((node) => !isKairosNode(node));
+  const nodes = graphNodes.filter((node) => !isKairosNode(node) && !node.protected && node.kind !== "tag" && node.kind !== "folder");
   if (nodes.length === 0) return null;
+  const normalizedNodes = normalizeStartingPositions(nodes, pinnedPositions);
 
-  const degrees = meaningfulConnectionDegrees(nodes, graphEdges);
-  const centres = clusterCentres(nodes);
-  const forceNodes: AtlasForceNode[] = nodes.map((node) => {
+  const degrees = meaningfulConnectionDegrees(normalizedNodes, graphEdges);
+  const centres = clusterCentres(normalizedNodes);
+  const forceNodes: AtlasForceNode[] = normalizedNodes.map((node) => {
     const position = seedPosition(node, pinnedPositions);
     const centre = centres.get(node.brainId || node.clusterId || "unassigned") ?? position;
     const pinned = pinnedPositions[node.id];
@@ -211,6 +189,7 @@ export function createAtlasPhysics(
   });
   const nodeIds = new Set(forceNodes.map((node) => node.id));
   const forceEdges: AtlasForceEdge[] = graphEdges
+    .filter((edge) => meaningfulEdgeKinds.has(edgeKind(edge)))
     .filter((edge) => nodeIds.has(edge.source) && nodeIds.has(edge.target) && edge.source !== edge.target)
     .map((edge) => ({ ...edge }));
   const nodeById = new Map(forceNodes.map((node) => [node.id, node]));
@@ -220,28 +199,30 @@ export function createAtlasPhysics(
       .id((node) => node.id)
       .distance(linkDistance)
       .strength(linkStrength))
-    .force("charge", forceManyBody<AtlasForceNode>().strength(-6).distanceMax(26))
+    // The atlas world is expressed as 0–100 viewport coordinates.  Keep the
+    // repulsion local and let the cluster gravity win, otherwise a dense vault
+    // expands into hundreds of world units and disappears from the canvas.
+    .force("charge", forceManyBody<AtlasForceNode>().strength(-2.4).distanceMax(18))
     .force("collide", forceCollide<AtlasForceNode>()
       .radius((node) => 1 + node.diameter / 12)
       .strength(0.9)
       .iterations(2))
     .force("cluster-x", forceX<AtlasForceNode>((node) => node.clusterX)
-      .strength((node) => node.kind === "brain" ? 0.09 : 0.065))
+      .strength((node) => node.kind === "brain" ? 0.2 : 0.14))
     .force("cluster-y", forceY<AtlasForceNode>((node) => node.clusterY)
-      .strength((node) => node.kind === "brain" ? 0.09 : 0.065))
-    .force("bounds", atlasBoundsForce())
+      .strength((node) => node.kind === "brain" ? 0.2 : 0.14))
     .alphaDecay(0.052)
     .velocityDecay(0.48);
 
   const positions = (): AtlasPositions => Object.fromEntries(forceNodes.map((node) => [node.id, {
-    x: clampAtlasCoordinate(node.x),
-    y: clampAtlasCoordinate(node.y),
+    x: Number(node.x.toFixed(2)),
+    y: Number(node.y.toFixed(2)),
   }]));
   const movePinnedNode = (nodeId: string, position: AtlasPosition) => {
     const node = nodeById.get(nodeId);
     if (!node) return;
-    const x = clampAtlasCoordinate(position.x);
-    const y = clampAtlasCoordinate(position.y);
+    const x = Number.isFinite(position.x) ? position.x : 50;
+    const y = Number.isFinite(position.y) ? position.y : 50;
     node.fx = x;
     node.fy = y;
     node.x = x;

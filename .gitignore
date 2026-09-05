@@ -7,3 +7,4 @@ target/
 .env.*
 !.env.example
 apps/desktop/src-tauri/gen/
+firmware/kairos-console/.pio/

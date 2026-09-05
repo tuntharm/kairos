@@ -45,14 +45,15 @@ provenance, and local application settings—not your knowledge base.
   requests ask for a choice rather than broadcasting across every folder.
 - **Keep context bounded and cited.** Kairos retrieves approved, relevant note
   excerpts and shows the routed brain(s) and source citations with a reply.
-- **Run local AI through Ollama.** It detects Ollama, guides setup, downloads
-  selected models in the app, and tests them at a 32K context window.
+- **Run local AI through Ollama.** The dedicated Local AI Lab detects Ollama,
+  guides setup, compares exact model artifacts, downloads only after approval,
+  and tests them at a fixed 32K context window.
 - **Use other providers deliberately.** OpenAI, Anthropic, Codex CLI, and
   Claude Code CLI remain modular options. Every non-local turn requires a
   one-time preview before anything leaves the Mac.
 - **See a whole-brain atlas.** The metadata-only map shows brain clusters,
-  explicit Markdown links, tags, and cross-brain bridges—without copying note
-  bodies into the graph.
+  explicit Markdown links and cross-brain bridges—without copying note bodies
+  into the graph. Tags and containment metadata stay optional/hidden.
 - **Keep writing intentional.** Kairos can prepare Markdown create/edit
   proposals only in an approved brain scope. You see the target path and diff
   and explicitly confirm the change. It cannot delete, move, or run arbitrary
@@ -83,19 +84,39 @@ are downloaded through Ollama from within Kairos.
 
 <p align="center">
   <a href="https://ollama.com/"><img src="https://img.shields.io/badge/Ollama-local%20runtime-111111?style=for-the-badge&logo=ollama&logoColor=white" alt="Ollama local runtime"></a>
-  <img src="https://img.shields.io/badge/Qwen-3.6%2035B%20MLX-615FFF?style=for-the-badge&logo=alibabacloud&logoColor=white" alt="Qwen 3.6 35B MLX">
-  <img src="https://img.shields.io/badge/GPT--OSS-20B-10A37F?style=for-the-badge&logo=openai&logoColor=white" alt="GPT-OSS 20B">
-  <img src="https://img.shields.io/badge/GLM-4.7%20Flash-2864DC?style=for-the-badge" alt="GLM 4.7 Flash">
+  <img src="https://img.shields.io/badge/LFM2.5-8B%20A1B-7C3AED?style=for-the-badge" alt="Liquid AI LFM2.5 8B A1B">
+  <img src="https://img.shields.io/badge/Gemma%204-12B%20MLX-4285F4?style=for-the-badge&logo=google&logoColor=white" alt="Google Gemma 4 12B MLX">
+  <img src="https://img.shields.io/badge/Qwen%203.6-35B%20MLX-615FFF?style=for-the-badge&logo=alibabacloud&logoColor=white" alt="Qwen 3.6 35B MLX">
 </p>
 
 <p align="center">
   <sub>Choose the model explicitly. Kairos recommends a safe fit for your hardware, then runs it on your Mac through Ollama.</sub>
 </p>
 
+| Manager role | Exact Ollama artifact | 32K planning note |
+| --- | --- | --- |
+| Fast | `lfm2.5:8b-a1b-q4_K_M` | 5.2 GB package; text/reasoning/tool routing; recommended, not yet verified until a local test passes |
+| General / smart | `gemma4:12b-mlx` | 7.7 GB package; multimodal documents, vision, audio, coding, and tools |
+| Premium local | `qwen3.6:35b-mlx` | 22 GB package; stronger offline reasoning/coding; exact 32K runtime test required |
+
+The download number is package size, not RAM/VRAM required. The Local AI Lab
+shows the conservative hardware fit, installed state, licence, resolved digest,
+and explicit Download, Test at 32K, and Use actions. It never silently switches
+the active model or falls back to cloud inference.
+
 - The model selector is explicit—Kairos never silently changes model or lowers
   the configured context window.
-- Recommendations are hardware-aware. Apple Silicon uses unified memory;
-  NVIDIA planning uses VRAM rather than extra system RAM.
+- Manager recommendations are intentionally small and hardware-aware. The
+  three role cards are `lfm2.5:8b-a1b-q4_K_M` (fast), `gemma4:12b-mlx`
+  (general/smart), and `qwen3.6:35b-mlx` (premium), when each exact artifact
+  fits the selected machine plan. Apple Silicon uses unified memory; NVIDIA
+  planning uses VRAM rather than extra system RAM.
+- Existing `qwen3:8b`, experimental variants, and test-required artifacts are
+  retained in Advanced until an explicit local benchmark proves them. The chat
+  picker shows installed models only.
+- LFM2.5 is text-only and uses the LFM Open License 1.0; review its licence
+  terms before commercial redistribution. Its card remains **Recommended — not
+  yet verified** until a real 32K run passes.
 - The memory budget is a recommendation cap, not a claim about the machine’s
   installed memory.
 - The default target is one **32K-context** conversation with conservative
